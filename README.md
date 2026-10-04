@@ -50,7 +50,7 @@ FloatTranslate 是一款面向日常外文阅读的 Windows 悬浮英译中工�
 
 ## 1.0 Roadmap / TODO / Community Tasks
 
-状态：`FROZEN` 需求冻结，`PLANNED` 待实现，`COMMUNITY` 适合社区贡献。
+状态：`FROZEN` 需求冻结，`DONE` 已实现并通过测试，`PLANNED` 待实现，`COMMUNITY` 适合社区贡献。
 
 | 状态 | 模块 | 任务 |
 |---|---|---|
@@ -62,10 +62,10 @@ FloatTranslate 是一款面向日常外文阅读的 Windows 悬浮英译中工�
 | FROZEN | Context | Global + Conversation Context；1M 默认；80% auto compact |
 | FROZEN | Windows | 置顶、托盘、热键、划词、单实例、Sidecar 监督 |
 | FROZEN | Privacy | 零遥测、Credential Manager、日志脱敏 |
-| PLANNED | Frontend | Vue 组件和 Design System |
-| PLANNED | Backend | Go REST/SSE 业务实现 |
-| PLANNED | Windows Host | Tauri/Rust 原生能力实现 |
-| PLANNED | Release | NSIS + Portable + GitHub Releases |
+| DONE | Frontend | Vue 组件和 Design System（vitest 162 用例全绿） |
+| DONE | Backend | Go REST/SSE 业务实现（翻译/Chat/Context/Compact/Backup） |
+| DONE | Windows Host | Tauri/Rust 原生能力实现（窗口/托盘/热键/划词/单实例） |
+| DONE | Release | NSIS + Portable 本地构建验证；CI/Release 工作流就绪 |
 | COMMUNITY | i18n | English / 日本語语言包 |
 | COMMUNITY | Providers | OpenAI / Gemini / Claude / Ollama / vLLM adapters |
 | COMMUNITY | Vocabulary | 标签、文件夹、熟练度、复习系统 |
