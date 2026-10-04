@@ -40,7 +40,13 @@ export interface RuntimeCapabilities {
  * docs/03 §10 and stays open for extra keys.
  */
 export type ThemeMode = 'system' | 'light' | 'dark'
-export type ProxyMode = 'system' | 'http' | 'https' | 'socks5'
+/**
+ * Phase 5 proxy model (docs/00 §9): `system` follows the OS proxy, `none`
+ * disables it, the rest are explicit schemes configured via `proxy_url`.
+ * The legacy host/port/username/password keys remain readable for backups
+ * but the UI writes `proxy_mode` + `proxy_url` only.
+ */
+export type ProxyMode = 'system' | 'none' | 'http' | 'https' | 'socks5'
 
 export interface AppSettings {
   theme?: ThemeMode
@@ -55,6 +61,7 @@ export interface AppSettings {
   ai_system_prompt?: string
   custom_translation_prompt?: string
   proxy_mode?: ProxyMode
+  proxy_url?: string
   proxy_host?: string
   proxy_port?: number
   proxy_username?: string
@@ -243,4 +250,31 @@ export interface ContextValue {
 
 export interface FilePathRequest {
   path: string
+}
+
+/** POST /backup/export → 200. */
+export interface BackupExportResult {
+  exported: boolean
+  path: string
+}
+
+/**
+ * Per-table merge counts of POST /backup/import → 200. Count keys mirror the
+ * backup sections (docs/05 §5); `messages_skipped` counts chat messages that
+ * were dropped because their parent chat was deduplicated away.
+ */
+export interface BackupImportCounts {
+  settings?: number
+  translation_history?: number
+  vocabulary?: number
+  terminology?: number
+  chats?: number
+  messages?: number
+  open_tabs?: number
+  messages_skipped?: number
+  [key: string]: number | undefined
+}
+
+export interface BackupImportResult {
+  imported: BackupImportCounts
 }

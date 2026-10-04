@@ -14,6 +14,7 @@ import (
 
 	"github.com/Weber-5/FloatTranslate/backend/internal/chat"
 	"github.com/Weber-5/FloatTranslate/backend/internal/config"
+	"github.com/Weber-5/FloatTranslate/backend/internal/credential"
 	"github.com/Weber-5/FloatTranslate/backend/internal/database"
 	"github.com/Weber-5/FloatTranslate/backend/internal/llm"
 	"github.com/Weber-5/FloatTranslate/backend/internal/logging"
@@ -63,14 +64,14 @@ func newChatTestEnvWithResolver(t *testing.T, resolver llm.Resolver) *chatTestEn
 	if resolver == nil {
 		resolver = llm.FixedResolver{P: provider}
 	}
-	providerSettings := NewProviderSettingsStore(settingsRepo)
+	providerSettings := NewProviderSettingsStore(settingsRepo, credential.NewMemory(), logging.NewRedactor())
 	pipeline, err := translation.NewPipeline(resolver, providerSettings.TranslationModel, terms, cacheRepo, historyRepo, settingsRepo)
 	if err != nil {
 		t.Fatalf("pipeline: %v", err)
 	}
 	chatSvc := chat.NewService(chatsRepo, settingsRepo, resolver, providerSettings.ChatModel, nil)
 	logger := logging.New(io.Discard, slog.LevelError, logging.NewRedactor())
-	handler := NewServer(cfg, logger, pipeline, settingsRepo, historyRepo, tabsRepo, vocabularyRepo,
+	handler := NewServer(cfg, logger, pipeline, settingsRepo, historyRepo, cacheRepo, tabsRepo, vocabularyRepo,
 		terms, chatsRepo, chatSvc, providerSettings, resolver, db.Ping).Handler()
 	return &chatTestEnv{h: handler, mock: provider, db: db}
 }

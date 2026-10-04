@@ -200,3 +200,61 @@ func (r *ChatsRepo) DeleteMessages(ctx context.Context, chatID string) error {
 	}
 	return nil
 }
+
+// DeleteAllChats removes every chat; messages disappear via
+// ON DELETE CASCADE (clear business data, docs/05 §7).
+func (r *ChatsRepo) DeleteAllChats(ctx context.Context) error {
+	if _, err := r.db.ExecContext(ctx, `DELETE FROM chats`); err != nil {
+		return fmt.Errorf("chats delete all: %w", err)
+	}
+	return nil
+}
+
+// ListAllMessages returns every message across all chats ordered by
+// (created_at, id) — the backup export view.
+func (r *ChatsRepo) ListAllMessages(ctx context.Context) ([]MessageRow, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT id, chat_id, role, content, reasoning_content, created_at, generation_id
+		 FROM messages ORDER BY created_at, id`)
+	if err != nil {
+		return nil, fmt.Errorf("messages list all: %w", err)
+	}
+	defer rows.Close()
+	var out []MessageRow
+	for rows.Next() {
+		var row MessageRow
+		if err := rows.Scan(&row.ID, &row.ChatID, &row.Role, &row.Content, &row.ReasoningContent,
+			&row.CreatedAt, &row.GenerationID); err != nil {
+			return nil, fmt.Errorf("messages list all scan: %w", err)
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+// MessageExists reports whether a message with id is stored (backup import
+// dedupe).
+func (r *ChatsRepo) MessageExists(ctx context.Context, id string) (bool, error) {
+	var one int
+	err := r.db.QueryRowContext(ctx, `SELECT 1 FROM messages WHERE id = ?`, id).Scan(&one)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("messages exists: %w", err)
+	}
+	return true, nil
+}
+
+// ChatExists reports whether a chat with id is stored (backup import dedupe).
+func (r *ChatsRepo) ChatExists(ctx context.Context, id string) (bool, error) {
+	var one int
+	err := r.db.QueryRowContext(ctx, `SELECT 1 FROM chats WHERE id = ?`, id).Scan(&one)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("chats exists: %w", err)
+	}
+	return true, nil
+}

@@ -75,10 +75,7 @@ func (a *OpenAIAdapter) Stream(ctx context.Context, req StreamRequest, onDelta f
 		return fmt.Errorf("encode stream request: %w", err)
 	}
 
-	client := a.client
-	if a.cfg.HTTPClient == nil {
-		client = sharedStreamClient()
-	}
+	client := a.streamClient()
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		joinURL(a.cfg.BaseURL, "chat/completions"), strings.NewReader(string(raw)))
 	if err != nil {

@@ -140,12 +140,19 @@ func endsWithWordChar(s string) bool {
 // Create adds a terminology entry and refreshes the snapshot.
 func (s *Service) Create(ctx context.Context, source, target string) (repository.TerminologyRow, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
+	return s.CreateWithID(ctx, ulcid.New(), source, target, now, now)
+}
+
+// CreateWithID inserts an entry with a caller-supplied id and timestamps
+// (backup import preserves the exported identity). Returns ErrConflict when
+// source already exists (case-insensitive) or the id is taken.
+func (s *Service) CreateWithID(ctx context.Context, id, source, target, createdAt, updatedAt string) (repository.TerminologyRow, error) {
 	row := repository.TerminologyRow{
-		ID:        ulcid.New(),
+		ID:        id,
 		Source:    strings.TrimSpace(source),
 		Target:    strings.TrimSpace(target),
-		CreatedAt: now,
-		UpdatedAt: now,
+		CreatedAt: createdAt,
+		UpdatedAt: updatedAt,
 	}
 	if err := s.repo.Create(ctx, row); err != nil {
 		return repository.TerminologyRow{}, err
@@ -154,6 +161,22 @@ func (s *Service) Create(ctx context.Context, source, target string) (repository
 		return repository.TerminologyRow{}, err
 	}
 	return row, nil
+}
+
+// ImportUpdate overwrites source/target/updated_at of an existing row while
+// keeping its id and created_at (backup merge: backup value wins, existing
+// identity preserved).
+func (s *Service) ImportUpdate(ctx context.Context, id, source, target, updatedAt string) error {
+	row := repository.TerminologyRow{
+		ID:        id,
+		Source:    strings.TrimSpace(source),
+		Target:    strings.TrimSpace(target),
+		UpdatedAt: updatedAt,
+	}
+	if err := s.repo.Update(ctx, row); err != nil {
+		return err
+	}
+	return s.Reload(ctx)
 }
 
 // Update modifies an entry and refreshes the snapshot.

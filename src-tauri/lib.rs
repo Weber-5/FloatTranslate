@@ -14,10 +14,6 @@
 // These modules are public so integration tests in `tests/` can exercise the
 // sidecar handshake, data-root resolution, geometry persistence, hotkey
 // parsing and the capture state machine directly.
-// These modules are public so integration tests in `tests/` can exercise the
-// sidecar handshake, data-root resolution, geometry persistence, hotkey
-// parsing, the capture state machine and the autostart toggle directly.
-pub mod autostart;
 pub mod data_root;
 pub mod hotkey;
 pub mod selection;
@@ -25,6 +21,7 @@ pub mod sidecar;
 pub mod token;
 pub mod window_state;
 
+mod autostart;
 mod commands;
 mod events;
 mod tray;
@@ -108,8 +105,6 @@ pub fn run() {
             commands::get_backend_config,
             commands::apply_hotkeys,
             commands::export_markdown,
-            commands::pick_save_path,
-            commands::pick_open_path,
             commands::set_autostart,
             commands::get_autostart,
             commands::set_always_on_top,

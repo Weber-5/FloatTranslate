@@ -43,6 +43,47 @@ func TestRedactionNeverEmitsSecretMarker(t *testing.T) {
 	}
 }
 
+// TestRedactionSessionTokenValueEverywhere freezes the Phase 5 rule: the
+// session token VALUE (as the middleware knows it) must never appear in any
+// log line, no matter the attribute key it travels under.
+func TestRedactionSessionTokenValueEverywhere(t *testing.T) {
+	token := "sess-value-x7K92mQ"
+	redactor := NewRedactor()
+	redactor.Register(token)
+
+	var buf bytes.Buffer
+	logger := New(&buf, slog.LevelInfo, redactor)
+
+	logger.Info("bearer leaked: "+token, "token", token, "nested", "prefix-"+token+"-suffix")
+	logger.Info("auth header", slog.String("authorization", "Bearer "+token))
+
+	out := buf.String()
+	if strings.Contains(out, token) {
+		t.Errorf("session token value leaked:\n%s", out)
+	}
+	if strings.Count(out, RedactedPlaceholder) < 4 {
+		t.Errorf("expected several redactions:\n%s", out)
+	}
+}
+
+// TestRedactionCredentialValue freezes the Phase 5 rule: a Credential
+// Manager value loaded at runtime must be registered and therefore redacted
+// wherever it would appear.
+func TestRedactionCredentialValue(t *testing.T) {
+	apiKey := "sk-credential-marker-31337"
+	redactor := NewRedactor()
+	redactor.Register(apiKey)
+
+	var buf bytes.Buffer
+	logger := New(&buf, slog.LevelInfo, redactor)
+	logger.Info("provider call", slog.String("api_key", apiKey), slog.String("msg", "key="+apiKey))
+
+	out := buf.String()
+	if strings.Contains(out, apiKey) {
+		t.Errorf("credential value leaked:\n%s", out)
+	}
+}
+
 func TestRedactStringPatterns(t *testing.T) {
 	r := NewRedactor()
 	r.Register("sess_tok_value_9182")
@@ -78,5 +119,32 @@ func TestRedactPreservesCleanValues(t *testing.T) {
 	}
 	if got := r.Redact("nothing to see"); got != "nothing to see" {
 		t.Errorf("Redact mangled clean value: %q", got)
+	}
+}
+
+func TestContentLoggingGuard(t *testing.T) {
+	t.Setenv(envContentDebug, "")
+
+	var buf bytes.Buffer
+	logger := New(&buf, slog.LevelDebug, NewRedactor())
+
+	// Default (env unset): content logs are dropped entirely.
+	LogContent(logger, slog.LevelInfo, "user content", "text", "hello world")
+	if buf.Len() != 0 {
+		t.Errorf("content log emitted while FT_DEBUG_CONTENT is unset:\n%s", buf.String())
+	}
+	if ContentEnabled() {
+		t.Error("ContentEnabled must default to false")
+	}
+
+	// Explicit opt-in: the line is emitted (and still redacted).
+	t.Setenv(envContentDebug, "1")
+	LogContent(logger, slog.LevelInfo, "user content", "text", "hello secretvalue99")
+	out := buf.String()
+	if !strings.Contains(out, "user content") {
+		t.Errorf("content log not emitted with FT_DEBUG_CONTENT=1:\n%s", out)
+	}
+	if !strings.Contains(out, "secretvalue99") {
+		t.Errorf("content log missing payload:\n%s", out)
 	}
 }

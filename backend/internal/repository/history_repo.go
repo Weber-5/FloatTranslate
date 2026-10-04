@@ -78,6 +78,20 @@ func (r *HistoryRepo) UpdateResult(ctx context.Context, id string, row HistoryRo
 	return nil
 }
 
+// HistoryExists reports whether a history row with id is stored (backup
+// import dedupe).
+func (r *HistoryRepo) HistoryExists(ctx context.Context, id string) (bool, error) {
+	var one int
+	err := r.db.QueryRowContext(ctx, `SELECT 1 FROM translation_history WHERE id = ?`, id).Scan(&one)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("history exists: %w", err)
+	}
+	return true, nil
+}
+
 // ListParams filters and paginates history listing.
 type ListParams struct {
 	Query  string // substring match on input_text
@@ -201,6 +215,28 @@ func (r *HistoryRepo) DeleteAll(ctx context.Context) error {
 		return fmt.Errorf("history delete all: %w", err)
 	}
 	return nil
+}
+
+// ListAll returns every history row in chronological order — used by the
+// backup export, which is not subject to the API page-size limit.
+func (r *HistoryRepo) ListAll(ctx context.Context) ([]HistoryRow, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT id, kind, input_text, normalized_input, result_json, source, model, created_at, last_viewed_at
+		 FROM translation_history ORDER BY created_at, id`)
+	if err != nil {
+		return nil, fmt.Errorf("history list all: %w", err)
+	}
+	defer rows.Close()
+	var out []HistoryRow
+	for rows.Next() {
+		var row HistoryRow
+		if err := rows.Scan(&row.ID, &row.Kind, &row.InputText, &row.NormalizedText, &row.ResultJSON,
+			&row.Source, &row.Model, &row.CreatedAt, &row.LastViewedAt); err != nil {
+			return nil, fmt.Errorf("history list all scan: %w", err)
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
 }
 
 // likeEscape escapes LIKE wildcards in user-provided query text.

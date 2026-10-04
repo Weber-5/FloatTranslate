@@ -53,6 +53,15 @@ func (r *SettingsRepo) Put(ctx context.Context, key, valueJSON string) error {
 	return nil
 }
 
+// DeleteAll wipes the settings table (Reset App). The API key is not stored
+// here and is unaffected.
+func (r *SettingsRepo) DeleteAll(ctx context.Context) error {
+	if _, err := r.db.ExecContext(ctx, `DELETE FROM settings`); err != nil {
+		return fmt.Errorf("settings delete all: %w", err)
+	}
+	return nil
+}
+
 // List returns every stored setting ordered by key.
 func (r *SettingsRepo) List(ctx context.Context) ([]SettingRow, error) {
 	rows, err := r.db.QueryContext(ctx, `SELECT key, value_json, updated_at FROM settings ORDER BY key`)

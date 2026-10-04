@@ -21,6 +21,7 @@ type Server struct {
 	pipeline         *translation.Pipeline
 	settings         *repository.SettingsRepo
 	history          *repository.HistoryRepo
+	cache            *repository.CacheRepo
 	tabs             *repository.TabsRepo
 	vocabulary       *repository.VocabularyRepo
 	terms            *terminology.Service
@@ -32,13 +33,14 @@ type Server struct {
 }
 
 // NewServer builds the API server. providerSettings holds the provider
-// configuration + in-memory API key; it MUST be the same instance the
-// pipeline and the chat service were built with so a saved key is visible
-// to both flows. resolver supplies the provider per request (the
+// configuration + Credential Manager-backed API key; it MUST be the same
+// instance the pipeline and the chat service were built with so a saved key
+// is visible to both flows. resolver supplies the provider per request (the
 // providerSettings store in production wiring; the mock only as a test
 // fixture). ping reports database health for /health.
 func NewServer(cfg config.Config, logger *slog.Logger, pipeline *translation.Pipeline,
-	settings *repository.SettingsRepo, history *repository.HistoryRepo, tabs *repository.TabsRepo,
+	settings *repository.SettingsRepo, history *repository.HistoryRepo,
+	cache *repository.CacheRepo, tabs *repository.TabsRepo,
 	vocabulary *repository.VocabularyRepo, terms *terminology.Service,
 	chats *repository.ChatsRepo, chatSvc *chat.Service,
 	providerSettings *ProviderSettingsStore, resolver llm.Resolver, ping func() error) *Server {
@@ -48,6 +50,7 @@ func NewServer(cfg config.Config, logger *slog.Logger, pipeline *translation.Pip
 		pipeline:         pipeline,
 		settings:         settings,
 		history:          history,
+		cache:            cache,
 		tabs:             tabs,
 		vocabulary:       vocabulary,
 		terms:            terms,
@@ -120,6 +123,12 @@ func (s *Server) Handler() http.Handler {
 
 		r.Get("/context/global", s.GetGlobalContext)
 		r.Put("/context/global", s.PutGlobalContext)
+
+		// --- Phase 5: hardening (backup, clear, reset) ---
+		r.Post("/backup/export", s.ExportBackup)
+		r.Post("/backup/import", s.ImportBackup)
+		r.Post("/data/clear-business", s.ClearBusiness)
+		r.Post("/data/reset-app", s.ResetApp)
 	})
 
 	return r

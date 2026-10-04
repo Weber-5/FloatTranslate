@@ -1,33 +1,48 @@
 <script setup lang="ts">
 /**
- * Network settings: proxy mode (system / HTTP / HTTPS / SOCKS5) with custom
- * fields (docs/00 §9). Mode (select) persists immediately; text fields
- * persist on change with an 800ms debounce (Phase 2 auto-save policy).
+ * Network settings (docs/00 §9, Phase 5 contract): proxy mode radio
+ * system / none / http / https / socks5 with a single proxy_url field shown
+ * for the custom modes. Client-side validation requires the URL scheme to
+ * match the mode (http:// / https:// / socks5://); invalid input shows an
+ * inline error and is NOT saved. Mode persists immediately; the URL
+ * persists on change with the 800ms debounce (Phase 2 auto-save policy).
  */
-import { computed, reactive, watch } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { ProxyMode } from '@/api/types'
 import { useSettingsStore } from '@/stores/settings'
+import { isValidProxyUrl, requiredProxyScheme } from '@/lib/proxy'
 
 const { t } = useI18n()
 const settings = useSettingsStore()
 
+const PROXY_MODES = ['system', 'none', 'http', 'https', 'socks5'] as const
+
 const form = reactive({
   proxy_mode: 'system' as ProxyMode,
-  proxy_host: '',
-  proxy_port: 0,
-  proxy_username: '',
-  proxy_password: '',
+  proxy_url: '',
+})
+
+// The inline error appears once the user commits the field (change/blur);
+// pristine state never starts red.
+const urlTouched = ref(false)
+
+const urlInvalid = computed(() => {
+  if (form.proxy_mode === 'system' || form.proxy_mode === 'none') return false
+  return urlTouched.value && !isValidProxyUrl(form.proxy_mode, form.proxy_url)
+})
+
+const urlError = computed(() => {
+  if (!urlInvalid.value) return null
+  const scheme = requiredProxyScheme(form.proxy_mode)
+  return t('settings.network.proxyUrlInvalid', { scheme: scheme?.replace(':', '') ?? '' })
 })
 
 function syncFromApp(): void {
   const app = settings.app
   if (!app) return
   form.proxy_mode = app.proxy_mode ?? 'system'
-  form.proxy_host = app.proxy_host ?? ''
-  form.proxy_port = app.proxy_port ?? 0
-  form.proxy_username = app.proxy_username ?? ''
-  form.proxy_password = app.proxy_password ?? ''
+  form.proxy_url = app.proxy_url ?? ''
 }
 
 // Sync on (re)load only; background saves never clobber in-progress typing.
@@ -39,21 +54,33 @@ watch(
   { immediate: true },
 )
 
-const isCustom = computed(() => form.proxy_mode !== 'system')
+const isCustom = computed(() => form.proxy_mode !== 'system' && form.proxy_mode !== 'none')
 
 function persistMode(): void {
-  void settings.saveApp({
-    proxy_mode: form.proxy_mode,
-  })
+  // Switching modes re-validates the URL for the new scheme; an invalid URL
+  // is never persisted for the new mode (inline error guides the fix).
+  void settings.saveApp({ proxy_mode: form.proxy_mode })
 }
 
-function persistFieldsDebounced(): void {
-  settings.saveAppDebounced({
-    proxy_host: form.proxy_host.trim(),
-    proxy_port: Number(form.proxy_port) || 0,
-    proxy_username: form.proxy_username,
-    proxy_password: form.proxy_password,
-  })
+function persistUrlDebounced(): void {
+  urlTouched.value = true
+  if (urlInvalid.value) return // inline error shown; field not saved
+  settings.saveAppDebounced({ proxy_url: form.proxy_url.trim() })
+}
+
+function modeLabel(mode: ProxyMode): string {
+  switch (mode) {
+    case 'system':
+      return t('settings.network.proxySystem')
+    case 'none':
+      return t('settings.network.proxyNone')
+    case 'http':
+      return t('settings.network.proxyHttp')
+    case 'https':
+      return t('settings.network.proxyHttps')
+    default:
+      return t('settings.network.proxySocks5')
+  }
 }
 </script>
 
@@ -62,43 +89,37 @@ function persistFieldsDebounced(): void {
     <h2 class="section-title">{{ t('settings.section.network') }}</h2>
 
     <div class="proxy-modes" role="radiogroup" :aria-label="t('settings.network.proxy')">
-      <label v-for="mode in ['system', 'http', 'https', 'socks5'] as const" :key="mode" class="proxy-option">
+      <label v-for="mode in PROXY_MODES" :key="mode" class="proxy-option">
         <input
           v-model="form.proxy_mode"
           type="radio"
           name="proxy-mode"
           :value="mode"
+          data-testid="proxy-mode"
           @change="persistMode"
         />
-        <span>{{
-          mode === 'system'
-            ? t('settings.network.proxySystem')
-            : mode === 'http'
-              ? t('settings.network.proxyHttp')
-              : mode === 'https'
-                ? t('settings.network.proxyHttps')
-                : t('settings.network.proxySocks5')
-        }}</span>
+        <span>{{ modeLabel(mode) }}</span>
       </label>
     </div>
 
-    <div v-if="isCustom" class="proxy-fields">
+    <div v-if="isCustom" class="proxy-url" data-testid="proxy-url-wrap">
       <label class="field">
-        <span class="field-label">{{ t('settings.network.host') }}</span>
-        <input v-model="form.proxy_host" type="text" class="input" @change="persistFieldsDebounced" />
+        <span class="field-label">{{ t('settings.network.proxyUrl') }}</span>
+        <input
+          v-model="form.proxy_url"
+          type="text"
+          class="input"
+          :class="{ invalid: urlInvalid }"
+          :placeholder="`${form.proxy_mode}://host:port`"
+          autocomplete="off"
+          spellcheck="false"
+          data-testid="proxy-url"
+          @change="persistUrlDebounced"
+        />
       </label>
-      <label class="field">
-        <span class="field-label">{{ t('settings.network.port') }}</span>
-        <input v-model.number="form.proxy_port" type="number" min="0" class="input" @change="persistFieldsDebounced" />
-      </label>
-      <label class="field">
-        <span class="field-label">{{ t('settings.network.username') }}</span>
-        <input v-model="form.proxy_username" type="text" class="input" autocomplete="off" @change="persistFieldsDebounced" />
-      </label>
-      <label class="field">
-        <span class="field-label">{{ t('settings.network.password') }}</span>
-        <input v-model="form.proxy_password" type="password" class="input" autocomplete="new-password" @change="persistFieldsDebounced" />
-      </label>
+      <p v-if="urlInvalid" class="url-error" role="alert" data-testid="proxy-url-error">
+        {{ urlError }}
+      </p>
     </div>
   </div>
 </template>
@@ -143,10 +164,10 @@ function persistFieldsDebounced(): void {
   margin: 0;
 }
 
-.proxy-fields {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: var(--space-3);
+.proxy-url {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
 .field {
@@ -158,5 +179,14 @@ function persistFieldsDebounced(): void {
 .field-label {
   font-size: 12px;
   color: var(--text-secondary);
+}
+
+.input.invalid {
+  border-color: var(--danger);
+}
+
+.url-error {
+  font-size: 12px;
+  color: var(--danger);
 }
 </style>

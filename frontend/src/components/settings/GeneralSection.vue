@@ -5,12 +5,19 @@
  * invoke apply_hotkeys FIRST — only when it reports registered do we PUT
  * the settings; on conflict we keep the previous value and show an inline
  * error, so the previous registrations remain active.
+ *
+ * Phase 5 native toggles: always-on-top / auto start invoke the host command
+ * FIRST, then persist the setting. When the host command is missing the UI
+ * shows the unsupported notice and keeps the previous value. The auto start
+ * toggle syncs its boot state from get_autostart (real host) and is disabled
+ * with a tooltip when that state cannot be read.
  */
-import { computed, ref } from 'vue'
+import { computed, nextTick, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { ThemeMode } from '@/api/types'
 import { useSettingsStore } from '@/stores/settings'
 import { applyHotkeys } from '@/services/hotkeys'
+import { getAutostart, setAutostart, setAlwaysOnTop } from '@/services/native'
 import { DEFAULT_HOTKEY_QUICK_TRANSLATE, DEFAULT_HOTKEY_TOGGLE } from '@/constants'
 import SettingRow from './SettingRow.vue'
 import HotkeyInput from './HotkeyInput.vue'
@@ -19,8 +26,80 @@ const { t } = useI18n()
 const settings = useSettingsStore()
 
 const theme = computed<ThemeMode>(() => settings.app?.theme ?? 'system')
-const alwaysOnTop = computed(() => settings.app?.always_on_top ?? false)
-const autoStart = computed(() => settings.app?.auto_start ?? false)
+const autoStartSupported = ref(true)
+
+/** Template refs so a failed command can force the checkbox back (Vue skips
+ * re-patching a prop that returned to its original value). */
+const alwaysOnTopInput = ref<HTMLInputElement | null>(null)
+const autoStartInput = ref<HTMLInputElement | null>(null)
+
+/**
+ * Optimistic local overrides so the switch reflects the native state even
+ * while the settings PUT is in flight; null → fall back to the saved setting.
+ */
+const alwaysOnTopOverride = ref<boolean | null>(null)
+const autoStartOverride = ref<boolean | null>(null)
+
+const alwaysOnTop = computed(() => alwaysOnTopOverride.value ?? settings.app?.always_on_top ?? false)
+const autoStart = computed(() => autoStartOverride.value ?? settings.app?.auto_start ?? false)
+
+/** Reverts a switch after a failed native command (state + DOM checkbox). */
+async function revertSwitch(
+  override: typeof alwaysOnTopOverride,
+  input: typeof alwaysOnTopInput,
+  previous: boolean,
+): Promise<void> {
+  override.value = previous
+  await nextTick()
+  if (input.value) input.value.checked = previous
+}
+
+onMounted(async () => {
+  // Sync the auto start toggle from the OS registration (real host); when
+  // the host cannot answer, disable the toggle with a tooltip instead.
+  const current = await getAutostart()
+  if (current.unsupported || !current.ok) {
+    autoStartSupported.value = false
+    return
+  }
+  autoStartOverride.value = current.value ?? false
+})
+
+function showNotice(message: string): void {
+  window.setTimeout(() => {
+    if (notice.value === message) notice.value = null
+  }, 4000)
+  notice.value = message
+}
+
+const notice = ref<string | null>(null)
+
+async function onAlwaysOnTopChange(checked: boolean): Promise<void> {
+  const previous = alwaysOnTop.value
+  alwaysOnTopOverride.value = checked
+  const result = await setAlwaysOnTop(checked)
+  if (!result.ok) {
+    await revertSwitch(alwaysOnTopOverride, alwaysOnTopInput, previous)
+    showNotice(t('common.unsupported'))
+    return
+  }
+  void settings.saveApp({ always_on_top: checked })
+  alwaysOnTopOverride.value = null
+}
+
+async function onAutoStartChange(checked: boolean): Promise<void> {
+  if (!autoStartSupported.value) return
+  const previous = autoStart.value
+  autoStartOverride.value = checked
+  const result = await setAutostart(checked)
+  if (!result.ok) {
+    await revertSwitch(autoStartOverride, autoStartInput, previous)
+    showNotice(t('common.unsupported'))
+    return
+  }
+  void settings.saveApp({ auto_start: checked })
+  autoStartOverride.value = null
+}
 
 const hotkeyToggle = computed(
   () => settings.app?.hotkey_toggle_window ?? DEFAULT_HOTKEY_TOGGLE,
@@ -71,14 +150,6 @@ const themeOptions: { value: ThemeMode; label: string }[] = [
 function setTheme(mode: ThemeMode): void {
   void settings.saveApp({ theme: mode })
 }
-
-function setAlwaysOnTop(checked: boolean): void {
-  void settings.saveApp({ always_on_top: checked })
-}
-
-function setAutoStart(checked: boolean): void {
-  void settings.saveApp({ auto_start: checked })
-}
 </script>
 
 <template>
@@ -105,22 +176,31 @@ function setAutoStart(checked: boolean): void {
     <SettingRow :label="t('settings.general.alwaysOnTop')" :hint="t('common.desktopOnly')">
       <label class="switch">
         <input
+          ref="alwaysOnTopInput"
           type="checkbox"
           :checked="alwaysOnTop"
           :aria-label="t('settings.general.alwaysOnTop')"
-          @change="setAlwaysOnTop(($event.target as HTMLInputElement).checked)"
+          data-testid="always-on-top"
+          @change="onAlwaysOnTopChange(($event.target as HTMLInputElement).checked)"
         />
         <span class="switch-track" aria-hidden="true" />
       </label>
+      <p v-if="notice" class="row-notice" role="status" data-testid="general-notice">{{ notice }}</p>
     </SettingRow>
 
-    <SettingRow :label="t('settings.general.autoStart')" :hint="t('common.desktopOnly')">
-      <label class="switch">
+    <SettingRow
+      :label="t('settings.general.autoStart')"
+      :hint="autoStartSupported ? t('common.desktopOnly') : t('settings.general.autoStartUnsupported')"
+    >
+      <label class="switch" :title="autoStartSupported ? undefined : t('common.unsupported')">
         <input
+          ref="autoStartInput"
           type="checkbox"
           :checked="autoStart"
+          :disabled="!autoStartSupported"
           :aria-label="t('settings.general.autoStart')"
-          @change="setAutoStart(($event.target as HTMLInputElement).checked)"
+          data-testid="auto-start"
+          @change="onAutoStartChange(($event.target as HTMLInputElement).checked)"
         />
         <span class="switch-track" aria-hidden="true" />
       </label>
@@ -247,5 +327,11 @@ function setAutoStart(checked: boolean): void {
 .hotkey-conflict {
   font-size: 12px;
   color: var(--danger);
+}
+
+.row-notice {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-tertiary);
 }
 </style>

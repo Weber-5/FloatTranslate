@@ -66,6 +66,15 @@ func (r *CacheRepo) Upsert(ctx context.Context, row CacheRow) error {
 	return nil
 }
 
+// DeleteAll clears the whole cache table (clear business data / backup
+// caches are intentionally not backed up).
+func (r *CacheRepo) DeleteAll(ctx context.Context) error {
+	if _, err := r.db.ExecContext(ctx, `DELETE FROM translation_cache`); err != nil {
+		return fmt.Errorf("cache delete all: %w", err)
+	}
+	return nil
+}
+
 // Touch updates last_used_at after a cache hit.
 func (r *CacheRepo) Touch(ctx context.Context, cacheKey, lastUsedAt string) error {
 	if _, err := r.db.ExecContext(ctx,

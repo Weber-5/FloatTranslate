@@ -10,6 +10,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -20,8 +21,10 @@ import (
 	"time"
 
 	"github.com/Weber-5/FloatTranslate/backend/internal/api"
+	"github.com/Weber-5/FloatTranslate/backend/internal/apperr"
 	"github.com/Weber-5/FloatTranslate/backend/internal/chat"
 	"github.com/Weber-5/FloatTranslate/backend/internal/config"
+	"github.com/Weber-5/FloatTranslate/backend/internal/credential"
 	"github.com/Weber-5/FloatTranslate/backend/internal/database"
 	"github.com/Weber-5/FloatTranslate/backend/internal/logging"
 	"github.com/Weber-5/FloatTranslate/backend/internal/migration"
@@ -37,6 +40,10 @@ func main() {
 		os.Exit(1)
 	}
 }
+
+// errMigrationFailed marks the startup migration failure: stdout must carry
+// exactly one machine-readable error line before the process exits 1.
+var errMigrationFailed = errors.New("migration failed")
 
 func run() error {
 	cfg, err := config.Load()
@@ -56,9 +63,13 @@ func run() error {
 	defer db.Close()
 
 	// Migrations run before anything else; failure aborts startup with
-	// MIGRATION_FAILED and no business writes may happen.
+	// MIGRATION_FAILED and no business writes may happen. The frozen startup
+	// contract: log the error, print ONE {"status":"error",...} line to
+	// stdout (the Tauri host parses it) and exit 1.
 	if err := migration.Run(db, migration.Embedded()); err != nil {
-		return err
+		logger.Error("migration failed", slog.String("code", string(apperr.AsE(err).Code)))
+		fmt.Println(`{"status":"error","message":"migration failed"}`)
+		return errMigrationFailed
 	}
 
 	settingsRepo := repository.NewSettingsRepo(db)
@@ -73,12 +84,12 @@ func run() error {
 	}
 
 	// One provider settings store backs the HTTP handlers, the translation
-	// pipeline and the chat service, so a saved in-memory API key is visible
-	// everywhere. When the store is not fully configured the resolver
-	// reports ErrNotConfigured and both flows answer PROVIDER_NOT_CONFIGURED
-	// (translations via the standard envelope, chat via a generation.error
-	// SSE event) — the mock provider is test-only.
-	providerSettings := api.NewProviderSettingsStore(settingsRepo)
+	// pipeline and the chat service, so a saved API key (Windows Credential
+	// Manager, ADR-006) is visible everywhere. When the store is not fully
+	// configured the resolver reports ErrNotConfigured and both flows answer
+	// PROVIDER_NOT_CONFIGURED (translations via the standard envelope, chat
+	// via a generation.error SSE event) — the mock provider is test-only.
+	providerSettings := api.NewProviderSettingsStore(settingsRepo, credential.NewWindows(), redactor)
 	pipeline, err := translation.NewPipeline(providerSettings, providerSettings.TranslationModel,
 		termsSvc, cacheRepo, historyRepo, settingsRepo)
 	if err != nil {
@@ -86,7 +97,7 @@ func run() error {
 	}
 	chatSvc := chat.NewService(chatsRepo, settingsRepo, providerSettings, providerSettings.ChatModel, logger)
 
-	server := api.NewServer(cfg, logger, pipeline, settingsRepo, historyRepo, tabsRepo,
+	server := api.NewServer(cfg, logger, pipeline, settingsRepo, historyRepo, cacheRepo, tabsRepo,
 		vocabularyRepo, termsSvc, chatsRepo, chatSvc, providerSettings, providerSettings, db.Ping)
 
 	listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", cfg.HTTPPort))

@@ -7,6 +7,8 @@
  */
 import type {
   AppSettings,
+  BackupExportResult,
+  BackupImportResult,
   Chat,
   ChatGenerationRequest,
   ChatMessage,
@@ -196,8 +198,8 @@ export interface ApiClient {
   ): Promise<ChatGenerationHandle>
 
   // Backup / data reset
-  exportBackup(path: string): Promise<void>
-  importBackup(path: string): Promise<void>
+  exportBackup(path: string): Promise<BackupExportResult>
+  importBackup(path: string): Promise<BackupImportResult>
   clearBusinessData(): Promise<void>
   resetApp(): Promise<void>
 }
@@ -682,12 +684,12 @@ export function createRealClient(config: BackendConfig): ApiClient {
 
     async exportBackup(path) {
       const body: FilePathRequest = { path }
-      await request<void>('/backup/export', { method: 'POST', body: json(body) })
+      return request<BackupExportResult>('/backup/export', { method: 'POST', body: json(body) })
     },
 
     async importBackup(path) {
       const body: FilePathRequest = { path }
-      await request<void>('/backup/import', { method: 'POST', body: json(body) })
+      return request<BackupImportResult>('/backup/import', { method: 'POST', body: json(body) })
     },
 
     async clearBusinessData() {

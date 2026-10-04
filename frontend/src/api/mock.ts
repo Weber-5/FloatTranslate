@@ -11,6 +11,8 @@
  */
 import type {
   AppSettings,
+  BackupExportResult,
+  BackupImportResult,
   Chat,
   ChatGenerationRequest,
   ChatMessage,
@@ -122,6 +124,7 @@ function defaultSettings(): AppSettings {
     ai_system_prompt: DEFAULT_AI_SYSTEM_PROMPT,
     custom_translation_prompt: '',
     proxy_mode: 'system',
+    proxy_url: '',
     proxy_host: '',
     proxy_port: 0,
     proxy_username: '',
@@ -713,13 +716,41 @@ export function createMockClient(): ApiClient {
       return { summary: `Mock 摘要：会话共 ${count} 条消息，较早上下文已压缩为要点。` }
     },
 
-    async exportBackup(_path: string) {
+    async exportBackup(path: string): Promise<BackupExportResult> {
       await sleep(200)
-      // Mock mode: nothing is written to disk.
+      // Mock mode: nothing is written to disk; the path is echoed like the
+      // frozen contract ({ exported, path }).
+      return { exported: true, path }
     },
 
-    async importBackup(_path: string) {
+    /**
+     * Mock import with the same envelope as the frozen contract. Scriptable
+     * test hooks: a path containing "unsupported-version" fails with 400
+     * BACKUP_VERSION_UNSUPPORTED; "trigger-error" fails with a retryable
+     * error; anything else "merges" zero rows.
+     */
+    async importBackup(path: string): Promise<BackupImportResult> {
       await sleep(200)
+      if (/unsupported[-_]version/i.test(path)) {
+        throw new ApiError('BACKUP_VERSION_UNSUPPORTED', '备份版本不受支持，请先升级应用', false, {
+          http_status: 400,
+        })
+      }
+      if (/trigger[- ]?error/i.test(path)) {
+        throw new ApiError('BACKUP_IMPORT_FAILED', '模拟的导入错误：请重试。', true)
+      }
+      return {
+        imported: {
+          settings: 0,
+          translation_history: 0,
+          vocabulary: 0,
+          terminology: 0,
+          chats: 0,
+          messages: 0,
+          open_tabs: 0,
+          messages_skipped: 0,
+        },
+      }
     },
 
     async clearBusinessData() {

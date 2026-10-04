@@ -118,6 +118,14 @@ func containsFold(s, substr string) bool {
 	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
 }
 
+// DeleteAll clears the whole vocabulary table (clear business data).
+func (r *VocabularyRepo) DeleteAll(ctx context.Context) error {
+	if _, err := r.db.ExecContext(ctx, `DELETE FROM vocabulary`); err != nil {
+		return fmt.Errorf("vocabulary delete all: %w", err)
+	}
+	return nil
+}
+
 // Delete removes a saved word. Returns ErrNotFound when missing.
 func (r *VocabularyRepo) Delete(ctx context.Context, lemma string) error {
 	res, err := r.db.ExecContext(ctx, `DELETE FROM vocabulary WHERE lemma = ?`, lemma)

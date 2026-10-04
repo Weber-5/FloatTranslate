@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
-	"sync"
 
 	"github.com/Weber-5/FloatTranslate/backend/internal/apperr"
+	"github.com/Weber-5/FloatTranslate/backend/internal/credential"
 	"github.com/Weber-5/FloatTranslate/backend/internal/dto"
 	"github.com/Weber-5/FloatTranslate/backend/internal/llm"
+	"github.com/Weber-5/FloatTranslate/backend/internal/logging"
+	"github.com/Weber-5/FloatTranslate/backend/internal/proxy"
 	"github.com/Weber-5/FloatTranslate/backend/internal/repository"
 	"github.com/Weber-5/FloatTranslate/backend/internal/translation"
 )
@@ -18,6 +20,12 @@ import (
 // provider configuration.
 const settingsKeyProvider = "provider"
 
+// Settings keys for the frozen proxy configuration (docs/00 §9).
+const (
+	settingsKeyProxyMode = "proxy_mode"
+	settingsKeyProxyURL  = "proxy_url"
+)
+
 // Provider modes (openapi enum); the wire protocol is shared.
 const (
 	ModeDeepseek         = llm.ModeDeepseek
@@ -25,19 +33,32 @@ const (
 )
 
 // ProviderSettingsStore keeps the non-secret provider configuration in the
-// settings table and the API key in memory only (Phase 2 — Credential
-// Manager integration arrives in Phase 5; nothing secret is written to disk
-// and a backend restart clears it: api_key_configured=false).
+// settings table and the API key in the Windows Credential Manager (Phase 5,
+// ADR-006): nothing secret is written to disk or SQLite, and the key survives
+// a backend restart. The credential store is abstracted
+// (credential.Store) so tests use credential.Memory.
 type ProviderSettingsStore struct {
-	repo *repository.SettingsRepo
-
-	mu     sync.RWMutex
-	apiKey string
+	repo     *repository.SettingsRepo
+	cred     credential.Store
+	redactor *logging.Redactor
 }
 
-// NewProviderSettingsStore builds the store.
-func NewProviderSettingsStore(repo *repository.SettingsRepo) *ProviderSettingsStore {
-	return &ProviderSettingsStore{repo: repo}
+// NewProviderSettingsStore builds the store. cred may be nil (memory-only
+// fallback, used by tests); redactor may be nil.
+func NewProviderSettingsStore(repo *repository.SettingsRepo, cred credential.Store, redactor *logging.Redactor) *ProviderSettingsStore {
+	if cred == nil {
+		cred = credential.NewMemory()
+	}
+	if redactor == nil {
+		redactor = logging.NewRedactor()
+	}
+	return &ProviderSettingsStore{repo: repo, cred: cred, redactor: redactor}
+}
+
+// DeleteCredential removes the stored API key (Reset App). Deleting a
+// missing credential is a no-op.
+func (s *ProviderSettingsStore) DeleteCredential() error {
+	return s.cred.Delete()
 }
 
 // defaults returns the frozen provider defaults (deepseek preset).
@@ -48,6 +69,30 @@ func defaults() dto.ProviderSettingsView {
 		TranslationModel: translation.DefaultTranslationModel,
 		ChatModel:        translation.DefaultTranslationModel,
 	}
+}
+
+// loadKey fetches the API key from the credential store, registering it with
+// the log redactor (defense in depth: a loaded credential value must never
+// reach a log sink).
+func (s *ProviderSettingsStore) loadKey() (string, bool, error) {
+	key, found, err := s.cred.Load()
+	if err != nil {
+		return "", false, err
+	}
+	if found && key != "" {
+		s.redactor.Register(key)
+	}
+	return key, found && key != "", nil
+}
+
+// apiKeyHint builds the frozen masked hint (docs/05 §4): the first three
+// characters followed by "…" when the key is longer than 5 characters,
+// otherwise just "…".
+func apiKeyHint(key string) string {
+	if len(key) > 5 {
+		return key[:3] + "…"
+	}
+	return "…"
 }
 
 // View builds the current ProviderSettingsView (never returns the key itself).
@@ -64,20 +109,21 @@ func (s *ProviderSettingsStore) View(ctx context.Context) (dto.ProviderSettingsV
 	} else if err != repository.ErrNotFound {
 		return dto.ProviderSettingsView{}, err
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	view.APIKeyConfigured = s.apiKey != ""
-	if s.apiKey != "" {
-		prefix := s.apiKey
-		if len(prefix) > 3 {
-			prefix = prefix[:3]
-		}
-		view.APIKeyHint = prefix + "..."
+	key, configured, err := s.loadKey()
+	if err != nil {
+		return dto.ProviderSettingsView{}, apperr.Wrap(apperr.CodeDatabaseError, "读取凭据失败", true, err)
+	}
+	view.APIKeyConfigured = configured
+	if configured {
+		view.APIKeyHint = apiKeyHint(key)
 	}
 	return view, nil
 }
 
-// Update persists the non-secret part and keeps a provided API key in memory.
+// Update persists the non-secret part and saves a provided API key to the
+// credential store. An absent or empty api_key is a no-op (the key can only
+// be replaced by submitting a new full value and is deleted exclusively by
+// Reset App — docs/08 §3).
 func (s *ProviderSettingsStore) Update(ctx context.Context, upd dto.ProviderSettingsUpdate) error {
 	upd.Mode = strings.TrimSpace(upd.Mode)
 	upd.BaseURL = strings.TrimSpace(upd.BaseURL)
@@ -106,26 +152,51 @@ func (s *ProviderSettingsStore) Update(ctx context.Context, upd dto.ProviderSett
 		return err
 	}
 	if upd.APIKey != "" {
-		s.mu.Lock()
-		s.apiKey = upd.APIKey
-		s.mu.Unlock()
+		if err := s.cred.Save(upd.APIKey); err != nil {
+			return apperr.Wrap(apperr.CodeDatabaseError, "保存 API Key 到凭据管理器失败", true, err)
+		}
+		s.redactor.Register(upd.APIKey)
 	}
 	return nil
 }
 
+// ProxySettings reads the effective proxy configuration from the settings
+// table (defaults: system / ""). Unknown or invalid stored modes fall back
+// to system (save-time validation keeps this unreachable in practice).
+func (s *ProviderSettingsStore) ProxySettings(ctx context.Context) proxy.Settings {
+	settings := proxy.Settings{Mode: proxy.ModeSystem}
+	if raw, err := s.repo.Get(ctx, settingsKeyProxyMode); err == nil && raw != "" {
+		var mode string
+		if json.Unmarshal([]byte(raw), &mode) == nil && proxy.ValidMode(strings.TrimSpace(mode)) {
+			settings.Mode = strings.TrimSpace(mode)
+		}
+	}
+	if raw, err := s.repo.Get(ctx, settingsKeyProxyURL); err == nil && raw != "" {
+		var url string
+		if json.Unmarshal([]byte(raw), &url) == nil {
+			settings.URL = strings.TrimSpace(url)
+		}
+	}
+	return settings
+}
+
 // TranslationProvider implements llm.Resolver: when mode, base_url, models
-// and the in-memory API key are all present it builds the real
-// OpenAI-compatible adapter; otherwise it reports llm.ErrNotConfigured so
-// the pipeline answers PROVIDER_NOT_CONFIGURED (no mock fallback).
+// and the stored API key are all present it builds the real
+// OpenAI-compatible adapter (with the configured proxy transport);
+// otherwise it reports llm.ErrNotConfigured so the pipeline answers
+// PROVIDER_NOT_CONFIGURED (no mock fallback).
 func (s *ProviderSettingsStore) TranslationProvider(ctx context.Context) (llm.Provider, error) {
 	view, err := s.View(ctx)
 	if err != nil {
+		// Credential-store failures surface as-is (DATABASE_ERROR envelope);
+		// they must NOT be swallowed into a misleading "not configured".
 		return nil, err
 	}
-	s.mu.RLock()
-	key := s.apiKey
-	s.mu.RUnlock()
-	if strings.TrimSpace(key) == "" ||
+	key, configured, err := s.loadKey()
+	if err != nil {
+		return nil, apperr.Wrap(apperr.CodeDatabaseError, "读取凭据失败", true, err)
+	}
+	if !configured ||
 		strings.TrimSpace(view.BaseURL) == "" ||
 		strings.TrimSpace(view.TranslationModel) == "" ||
 		strings.TrimSpace(view.ChatModel) == "" ||
@@ -138,13 +209,15 @@ func (s *ProviderSettingsStore) TranslationProvider(ctx context.Context) (llm.Pr
 		APIKey:           key,
 		TranslationModel: view.TranslationModel,
 		ChatModel:        view.ChatModel,
+		Proxy:            s.ProxySettings(ctx),
 	}), nil
 }
 
 // TestConfig resolves the effective provider configuration for a connection
 // test: the current saved settings with any full provider settings from the
 // request body overriding them; the key comes from the body when supplied,
-// otherwise from memory.
+// otherwise from the credential store. The current proxy settings always
+// apply (the body cannot override the proxy).
 func (s *ProviderSettingsStore) TestConfig(ctx context.Context, upd *dto.ProviderSettingsUpdate) (llm.TestConfig, error) {
 	view, err := s.View(ctx)
 	if err != nil {
@@ -161,9 +234,10 @@ func (s *ProviderSettingsStore) TestConfig(ctx context.Context, upd *dto.Provide
 			view.TranslationModel = model
 		}
 	}
-	s.mu.RLock()
-	key := s.apiKey
-	s.mu.RUnlock()
+	key, _, err := s.loadKey()
+	if err != nil {
+		return llm.TestConfig{}, apperr.Wrap(apperr.CodeDatabaseError, "读取凭据失败", true, err)
+	}
 	if upd != nil && upd.APIKey != "" {
 		key = upd.APIKey
 	}
@@ -172,6 +246,7 @@ func (s *ProviderSettingsStore) TestConfig(ctx context.Context, upd *dto.Provide
 		BaseURL: view.BaseURL,
 		APIKey:  key,
 		Model:   view.TranslationModel,
+		Proxy:   s.ProxySettings(ctx),
 	}, nil
 }
 
@@ -267,12 +342,29 @@ func (s *Server) GetSettings(w http.ResponseWriter, r *http.Request) {
 
 // PutSettings implements PUT /api/v1/settings: the body is a flat JSON
 // object whose top-level keys are stored row-per-key (arbitrary non-secret
-// kv rows are accepted).
+// kv rows are accepted). The proxy keys are validated together against the
+// frozen mode/URL rules; an invalid pair rejects the whole PUT with
+// INVALID_REQUEST before anything is stored.
 func (s *Server) PutSettings(w http.ResponseWriter, r *http.Request) {
 	var body map[string]json.RawMessage
 	if err := decodeJSON(w, r, &body); err != nil {
 		apperr.WriteHTTP(w, err)
 		return
+	}
+	modeRaw, modePresent := body[settingsKeyProxyMode]
+	urlRaw, urlPresent := body[settingsKeyProxyURL]
+	if modePresent || urlPresent {
+		effective := s.providerSettings.ProxySettings(r.Context())
+		if modePresent {
+			effective.Mode = strings.TrimSpace(stringValue(modeRaw))
+		}
+		if urlPresent {
+			effective.URL = stringValue(urlRaw)
+		}
+		if err := proxy.Validate(effective.Mode, effective.URL); err != nil {
+			apperr.WriteHTTP(w, apperr.New(apperr.CodeInvalidRequest, err.Error(), false))
+			return
+		}
 	}
 	for key, value := range body {
 		if key == settingsKeyProvider {
@@ -286,6 +378,15 @@ func (s *Server) PutSettings(w http.ResponseWriter, r *http.Request) {
 	s.GetSettings(w, r)
 }
 
+// stringValue decodes a JSON string value, "" on any mismatch.
+func stringValue(raw json.RawMessage) string {
+	var s string
+	if json.Unmarshal(raw, &s) != nil {
+		return ""
+	}
+	return s
+}
+
 // GetProviderSettings implements GET /api/v1/settings/provider.
 func (s *Server) GetProviderSettings(w http.ResponseWriter, r *http.Request) {
 	view, err := s.providerSettings.View(r.Context())
@@ -296,8 +397,8 @@ func (s *Server) GetProviderSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, view)
 }
 
-// PutProviderSettings implements PUT /api/v1/settings/provider. The API key
-// (when present) is kept in memory only in Phase 2.
+// PutProviderSettings implements PUT /api/v1/settings/provider. A non-empty
+// api_key is saved to the credential store; absent/empty leaves it unchanged.
 func (s *Server) PutProviderSettings(w http.ResponseWriter, r *http.Request) {
 	var upd dto.ProviderSettingsUpdate
 	if err := decodeJSON(w, r, &upd); err != nil {

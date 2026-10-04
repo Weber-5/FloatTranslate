@@ -1,0 +1,180 @@
+import { describe, expect, it, vi, afterEach } from 'vitest'
+import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
+import { setupFreshEnv } from './helpers'
+import { useSettingsStore } from '@/stores/settings'
+import { APP_VERSION } from '@/constants'
+import {
+  checkForUpdate,
+  compareSemver,
+  parseSemver,
+  fetchLatestRelease,
+  UpdateCheckError,
+} from '@/services/update'
+import AboutSection from '@/components/settings/AboutSection.vue'
+
+function releaseResponse(tag: string): Response {
+  return new Response(
+    JSON.stringify({ tag_name: tag, html_url: `https://github.com/Weber-5/FloatTranslate/releases/tag/${tag}` }),
+    { status: 200, headers: { 'Content-Type': 'application/json' } },
+  )
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+  vi.restoreAllMocks()
+})
+
+describe('semver comparison (docs/10 §5)', () => {
+  it('parses v-prefixed tags and ignores pre-release suffixes', () => {
+    expect(parseSemver('v1.2.3')).toEqual({ major: 1, minor: 2, patch: 3 })
+    expect(parseSemver('1.2.3')).toEqual({ major: 1, minor: 2, patch: 3 })
+    expect(parseSemver('v1.2.3-rc.1')).toEqual({ major: 1, minor: 2, patch: 3 })
+    expect(parseSemver('nonsense')).toBeNull()
+  })
+
+  it('compares major/minor/patch lexicographically', () => {
+    expect(compareSemver('v1.0.1', APP_VERSION)).toBeGreaterThan(0)
+    expect(compareSemver('v1.0.0', APP_VERSION)).toBe(0)
+    expect(compareSemver('v0.9.9', APP_VERSION)).toBeLessThan(0)
+    expect(compareSemver('v2.0.0', 'v1.99.99')).toBeGreaterThan(0)
+    expect(compareSemver('v1.10.0', 'v1.9.9')).toBeGreaterThan(0)
+    // Unparseable tags never claim an update.
+    expect(compareSemver('nonsense', APP_VERSION)).toBe(0)
+  })
+})
+
+describe('update service', () => {
+  it('fetches the frozen GitHub releases endpoint with the Accept header', async () => {
+    let url = ''
+    let accept: string | undefined
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        url = String(input)
+        accept = (init?.headers as Record<string, string>).Accept
+        return releaseResponse('v1.0.1')
+      }),
+    )
+    const latest = await fetchLatestRelease()
+    expect(url).toBe('https://api.github.com/repos/Weber-5/FloatTranslate/releases/latest')
+    expect(accept).toBe('application/vnd.github+json')
+    expect(latest.tag_name).toBe('v1.0.1')
+  })
+
+  it('rejects with UpdateCheckError on network/HTTP failures', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new TypeError('offline')
+      }),
+    )
+    await expect(fetchLatestRelease()).rejects.toBeInstanceOf(UpdateCheckError)
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('nope', { status: 500 })))
+    await expect(fetchLatestRelease()).rejects.toBeInstanceOf(UpdateCheckError)
+  })
+
+  it('checkForUpdate classifies newer vs equal releases', async () => {
+    const newer = await checkForUpdate(APP_VERSION, { tag_name: 'v1.0.2' })
+    expect(newer.status).toBe('update-available')
+    const same = await checkForUpdate(APP_VERSION, { tag_name: 'v1.0.0' })
+    expect(same.status).toBe('up-to-date')
+    const older = await checkForUpdate(APP_VERSION, { tag_name: 'v0.9.0' })
+    expect(older.status).toBe('up-to-date')
+  })
+})
+
+describe('AboutSection update check UI', () => {
+  async function mountAbout(): Promise<{ wrapper: VueWrapper }> {
+    const { i18n } = await setupFreshEnv()
+    const settings = useSettingsStore()
+    await settings.load()
+    const wrapper = mount(AboutSection, { global: { plugins: [i18n] } })
+    await flushPromises()
+    return { wrapper }
+  }
+
+  it('shows the app version and the mock badge', async () => {
+    const { wrapper } = await mountAbout()
+    expect(wrapper.find('[data-testid="app-version"]').text()).toBe(`v${APP_VERSION}`)
+    expect(wrapper.text()).toContain('Mock')
+    wrapper.unmount()
+  })
+
+  it('newer release → banner with version, release link and URL fallback', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => releaseResponse('v1.0.2')))
+    const { wrapper } = await mountAbout()
+
+    await wrapper.find('[data-testid="check-update"]').trigger('click')
+    await flushPromises()
+
+    const banner = wrapper.find('[data-testid="update-banner"]')
+    expect(banner.exists()).toBe(true)
+    expect(banner.text()).toContain('v1.0.2')
+    const link = wrapper.find('[data-testid="update-link"]')
+    expect(link.attributes('href')).toBe(
+      'https://github.com/Weber-5/FloatTranslate/releases/tag/v1.0.2',
+    )
+    expect(link.attributes('rel')).toContain('noopener')
+    expect(banner.text()).toContain('releases/tag/v1.0.2')
+    wrapper.unmount()
+  })
+
+  it('equal version → up-to-date toast, no banner', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => releaseResponse('v1.0.0')))
+    const { wrapper } = await mountAbout()
+
+    await wrapper.find('[data-testid="check-update"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="update-banner"]').exists()).toBe(false)
+    expect(wrapper.find('.notice').text()).toContain('已是最新版本')
+    wrapper.unmount()
+  })
+
+  it('network failure → retryable inline error that recovers', async () => {
+    const fetchMock = vi.fn(async (): Promise<Response> => {
+      throw new TypeError('offline')
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const { wrapper } = await mountAbout()
+
+    await wrapper.find('[data-testid="check-update"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="update-error"]').exists()).toBe(true)
+
+    // Retry with a working network → banner appears.
+    fetchMock.mockImplementation(async () => releaseResponse('v1.1.0'))
+    await wrapper.find('[data-testid="update-retry"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="update-error"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="update-banner"]').text()).toContain('v1.1.0')
+    wrapper.unmount()
+  })
+
+  it('mock demo flag simulates v1.0.1 without any network request', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const { i18n } = await setupFreshEnv()
+    const settings = useSettingsStore()
+    await settings.load()
+    await settings.saveApp({ force_update_available: true })
+    const wrapper = mount(AboutSection, { global: { plugins: [i18n] } })
+    await flushPromises()
+
+    await wrapper.find('[data-testid="check-update"]').trigger('click')
+    await flushPromises()
+
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-testid="update-banner"]').text()).toContain('v1.0.1')
+    wrapper.unmount()
+  })
+
+  it('open logs dir: mock mode shows the success notice; no clear-logs button', async () => {
+    const { wrapper } = await mountAbout()
+    await wrapper.find('[data-testid="open-logs"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.notice').text()).toContain('日志目录已打开')
+    expect(wrapper.text()).not.toContain('清空日志')
+    wrapper.unmount()
+  })
+})

@@ -8,6 +8,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -208,4 +209,28 @@ func LogRequest(logger *slog.Logger, method, path string, status int, durationMS
 		slog.Int("status", status),
 		slog.Float64("duration_ms", durationMS),
 	)
+}
+
+// envContentDebug is the opt-in flag for content-level logging.
+const envContentDebug = "FT_DEBUG_CONTENT"
+
+// ContentEnabled reports whether content-level logging (user translation
+// input/output, chat message bodies) is enabled. It is ON only when the
+// environment variable FT_DEBUG_CONTENT=1.
+//
+// RELEASE BUILDS MUST NEVER SET FT_DEBUG_CONTENT (docs/08 §4): content-level
+// logs may contain user text and exist solely for local development
+// debugging. The redaction layer still applies to everything that is logged.
+func ContentEnabled() bool {
+	return os.Getenv(envContentDebug) == "1"
+}
+
+// LogContent logs msg with attrs ONLY when content-level debugging is
+// enabled (FT_DEBUG_CONTENT=1); otherwise it is a no-op. Use it for any log
+// line that would carry user content.
+func LogContent(logger *slog.Logger, level slog.Level, msg string, args ...any) {
+	if !ContentEnabled() {
+		return
+	}
+	logger.Log(context.Background(), level, msg, args...)
 }

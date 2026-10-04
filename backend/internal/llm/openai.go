@@ -25,6 +25,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/Weber-5/FloatTranslate/backend/internal/proxy"
 )
 
 // Provider modes (openapi enum). Both share the OpenAI Chat Completions
@@ -58,26 +60,48 @@ type AdapterConfig struct {
 	Timeout time.Duration
 	// HTTPClient overrides the transport (used by tests).
 	HTTPClient *http.Client
+	// Proxy carries the frozen proxy settings (docs/00 §9): applied when the
+	// adapter builds its own HTTP client; ignored when HTTPClient is set.
+	Proxy proxy.Settings
 }
 
 // OpenAIAdapter implements Provider against any OpenAI Chat Completions
 // compatible endpoint.
 type OpenAIAdapter struct {
-	cfg    AdapterConfig
-	client *http.Client
+	cfg       AdapterConfig
+	client    *http.Client
+	transport http.RoundTripper
 }
 
-// NewOpenAIAdapter builds an adapter from cfg.
+// NewOpenAIAdapter builds an adapter from cfg. When cfg.HTTPClient is nil a
+// client is built whose transport honors the configured proxy settings
+// (rebuilt per adapter construction, i.e. per provider settings change).
 func NewOpenAIAdapter(cfg AdapterConfig) *OpenAIAdapter {
 	timeout := cfg.Timeout
 	if timeout <= 0 {
 		timeout = DefaultRequestTimeout
 	}
 	client := cfg.HTTPClient
+	var transport http.RoundTripper
 	if client == nil {
-		client = &http.Client{Timeout: timeout}
+		tr := http.DefaultTransport.(*http.Transport).Clone()
+		transport = proxy.ConfigureTransport(tr, cfg.Proxy)
+		client = &http.Client{Transport: transport, Timeout: timeout}
 	}
-	return &OpenAIAdapter{cfg: cfg, client: client}
+	return &OpenAIAdapter{cfg: cfg, client: client, transport: transport}
+}
+
+// streamClient returns the client for streaming calls: no overall timeout (a
+// chat stream may legitimately stay idle; cancellation is context-driven)
+// while still honoring the configured proxy transport.
+func (a *OpenAIAdapter) streamClient() *http.Client {
+	if a.cfg.HTTPClient != nil {
+		return a.cfg.HTTPClient
+	}
+	if a.transport != nil {
+		return &http.Client{Transport: a.transport}
+	}
+	return sharedStreamClient()
 }
 
 // Capabilities reports static chat capabilities. Context/output windows are
@@ -279,6 +303,8 @@ type TestConfig struct {
 	Timeout time.Duration
 	// HTTPClient overrides the transport (used by tests).
 	HTTPClient *http.Client
+	// Proxy carries the frozen proxy settings applied to the probe client.
+	Proxy proxy.Settings
 }
 
 // TestResult is the outcome of a connection test. Message is user-facing
@@ -314,7 +340,8 @@ func TestConnection(ctx context.Context, cfg TestConfig) TestResult {
 	}
 	client := cfg.HTTPClient
 	if client == nil {
-		client = &http.Client{Timeout: timeout}
+		tr := http.DefaultTransport.(*http.Transport).Clone()
+		client = &http.Client{Transport: proxy.ConfigureTransport(tr, cfg.Proxy), Timeout: timeout}
 	}
 
 	// Probe 1: GET {base}/models.

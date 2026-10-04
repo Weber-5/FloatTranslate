@@ -56,6 +56,14 @@ func (r *TabsRepo) ReplaceAll(ctx context.Context, rows []TabRow) error {
 	return nil
 }
 
+// DeleteAll clears the whole open_tabs table (clear business / reset app).
+func (r *TabsRepo) DeleteAll(ctx context.Context) error {
+	if _, err := r.db.ExecContext(ctx, `DELETE FROM open_tabs`); err != nil {
+		return fmt.Errorf("tabs delete all: %w", err)
+	}
+	return nil
+}
+
 // List returns the persisted tabs ordered by position.
 func (r *TabsRepo) List(ctx context.Context) ([]TabRow, error) {
 	rows, err := r.db.QueryContext(ctx,

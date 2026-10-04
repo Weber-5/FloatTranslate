@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/Weber-5/FloatTranslate/backend/internal/chat"
 	"github.com/Weber-5/FloatTranslate/backend/internal/config"
+	"github.com/Weber-5/FloatTranslate/backend/internal/credential"
 	"github.com/Weber-5/FloatTranslate/backend/internal/database"
 	"github.com/Weber-5/FloatTranslate/backend/internal/llm"
 	"github.com/Weber-5/FloatTranslate/backend/internal/logging"
@@ -31,17 +33,34 @@ func newTestHandler(t *testing.T) http.Handler {
 	return newTestHandlerWithResolver(t, nil)
 }
 
+// newTestHandlerWithCredential builds the handler on the given database and
+// credential store (used by the backup/clear/reset tests, which need to seed
+// rows and inspect credential state).
+func newTestHandlerWithCredential(t *testing.T, db *sql.DB, cred credential.Store) http.Handler {
+	t.Helper()
+	return newTestHandlerFull(t, db, cred, nil)
+}
+
 // newTestHandlerWithResolver builds the API handler; when resolver is nil a
 // mock-configured resolver is used (the mock is a test fixture injected via
 // llm.Resolver, never reachable through the production wiring).
 func newTestHandlerWithResolver(t *testing.T, resolver llm.Resolver) http.Handler {
 	t.Helper()
+	return newTestHandlerFull(t, nil, nil, resolver)
+}
+
+func newTestHandlerFull(t *testing.T, existingDB *sql.DB, cred credential.Store, resolver llm.Resolver) http.Handler {
+	t.Helper()
 	cfg := config.Config{HTTPPort: "0", SessionToken: testToken, Version: config.DefaultVersion}
-	db, err := database.Open(filepath.Join(t.TempDir(), "api.db"))
-	if err != nil {
-		t.Fatalf("open database: %v", err)
+	db := existingDB
+	if db == nil {
+		var err error
+		db, err = database.Open(filepath.Join(t.TempDir(), "api.db"))
+		if err != nil {
+			t.Fatalf("open database: %v", err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
 	}
-	t.Cleanup(func() { _ = db.Close() })
 	if err := migration.Run(db, migration.Embedded()); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
@@ -58,7 +77,10 @@ func newTestHandlerWithResolver(t *testing.T, resolver llm.Resolver) http.Handle
 	if resolver == nil {
 		resolver = llm.FixedResolver{P: provider}
 	}
-	providerSettings := NewProviderSettingsStore(settingsRepo)
+	if cred == nil {
+		cred = credential.NewMemory()
+	}
+	providerSettings := NewProviderSettingsStore(settingsRepo, cred, logging.NewRedactor())
 	pipeline, err := translation.NewPipeline(resolver, providerSettings.TranslationModel, terms, cacheRepo, historyRepo, settingsRepo)
 	if err != nil {
 		t.Fatalf("pipeline: %v", err)
@@ -66,7 +88,7 @@ func newTestHandlerWithResolver(t *testing.T, resolver llm.Resolver) http.Handle
 	chatsRepo := repository.NewChatsRepo(db)
 	chatSvc := chat.NewService(chatsRepo, settingsRepo, resolver, providerSettings.ChatModel, nil)
 	logger := logging.New(io.Discard, slog.LevelError, logging.NewRedactor())
-	return NewServer(cfg, logger, pipeline, settingsRepo, historyRepo, tabsRepo, vocabularyRepo,
+	return NewServer(cfg, logger, pipeline, settingsRepo, historyRepo, cacheRepo, tabsRepo, vocabularyRepo,
 		terms, chatsRepo, chatSvc, providerSettings, resolver, db.Ping).Handler()
 }
 
@@ -353,8 +375,8 @@ func TestProviderSettingsAndKeyMasking(t *testing.T) {
 	if body["api_key_configured"] != true {
 		t.Errorf("api_key_configured should be true: %v", body)
 	}
-	if hint, _ := body["api_key_hint"].(string); hint != "sk-..." {
-		t.Errorf("api_key_hint = %q, want sk-...", hint)
+	if hint, _ := body["api_key_hint"].(string); hint != "sk-…" {
+		t.Errorf("api_key_hint = %q, want sk-… (first 3 chars + ellipsis)", hint)
 	}
 	if strings.Contains(bodyString(t, body), "sk-secret-123") {
 		t.Errorf("provider settings view must never return the raw key")

@@ -181,3 +181,36 @@ type ContextValue struct {
 type CompactResponse struct {
 	Summary string `json:"summary"`
 }
+
+// --- Phase 5: backup / clear / reset ---
+
+// FilePathRequest mirrors components.schemas.FilePathRequest (backup
+// export/import bodies).
+type FilePathRequest struct {
+	Path string `json:"path"`
+}
+
+// ExportResponse is the POST /backup/export body.
+type ExportResponse struct {
+	Exported bool   `json:"exported"`
+	Path     string `json:"path"`
+}
+
+// ImportCounts reports how many rows each merge rule applied (docs/05 §6).
+// MessagesSkipped counts backup messages whose chat_id did not exist after
+// the chat merge.
+type ImportCounts struct {
+	Settings           int `json:"settings"`
+	TranslationHistory int `json:"translation_history"`
+	Vocabulary         int `json:"vocabulary"`
+	Terminology        int `json:"terminology"`
+	Chats              int `json:"chats"`
+	Messages           int `json:"messages"`
+	MessagesSkipped    int `json:"messages_skipped"`
+	OpenTabs           int `json:"open_tabs"`
+}
+
+// ImportResponse is the POST /backup/import body.
+type ImportResponse struct {
+	Imported ImportCounts `json:"imported"`
+}

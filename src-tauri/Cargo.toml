@@ -18,6 +18,7 @@ tauri = { version = "2", features = ["tray-icon", "image-ico"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-dialog = "2"
+tauri-plugin-autostart = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "6"
@@ -36,3 +37,6 @@ windows = { version = "0.62", features = [
 
 [dev-dependencies]
 tempfile = "3"
+# `test` feature unlocks `tauri::test` (mock runtime) for the opt-in autostart
+# E2E round-trip; it never affects normal builds.
+tauri = { version = "2", features = ["test"] }
