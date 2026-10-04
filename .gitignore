@@ -1,0 +1,48 @@
+# ---- Go ----
+backend/bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+go.work.sum
+
+# ---- Node / Vue ----
+node_modules/
+dist/
+dist-ssr/
+coverage/
+*.local
+.vite/
+.eslintcache
+
+# ---- Rust / Tauri ----
+src-tauri/target/
+src-tauri/gen/
+Cargo.lock.orig
+
+# ---- Data / local artifacts ----
+FloatTranslateData/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.log
+logs/
+
+# ---- Editors / OS ----
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- Env / secrets (must never be committed) ----
+.env
+.env.*
+*.pem
+*.key
+*.pfx

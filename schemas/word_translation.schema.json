@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://floattranslate.local/schema/word-translation.json",
+  "title": "WordTranslation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "word",
+    "lemma",
+    "phonetic_uk",
+    "phonetic_us",
+    "parts_of_speech",
+    "synonyms",
+    "inflections"
+  ],
+  "properties": {
+    "word": {
+      "type": "string",
+      "minLength": 1
+    },
+    "lemma": {
+      "type": "string",
+      "minLength": 1
+    },
+    "phonetic_uk": {
+      "type": "string"
+    },
+    "phonetic_us": {
+      "type": "string"
+    },
+    "parts_of_speech": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "part",
+          "meanings"
+        ],
+        "properties": {
+          "part": {
+            "type": "string",
+            "minLength": 1
+          },
+          "meanings": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      }
+    },
+    "synonyms": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "inflections": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    }
+  }
+}

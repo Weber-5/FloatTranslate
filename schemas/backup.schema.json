@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://floattranslate.local/schema/backup.json",
+  "title": "FloatTranslateBackup",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "backup_schema_version",
+    "exported_at",
+    "app_version",
+    "settings",
+    "translation_history",
+    "vocabulary",
+    "terminology",
+    "chats",
+    "messages",
+    "open_tabs"
+  ],
+  "properties": {
+    "backup_schema_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "exported_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "app_version": {
+      "type": "string"
+    },
+    "settings": {
+      "type": "object"
+    },
+    "translation_history": {
+      "type": "array"
+    },
+    "vocabulary": {
+      "type": "array"
+    },
+    "terminology": {
+      "type": "array"
+    },
+    "chats": {
+      "type": "array"
+    },
+    "messages": {
+      "type": "array"
+    },
+    "open_tabs": {
+      "type": "array"
+    }
+  }
+}
