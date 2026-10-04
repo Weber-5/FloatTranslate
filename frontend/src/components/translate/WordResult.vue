@@ -9,7 +9,7 @@ import { useI18n } from 'vue-i18n'
 import type { TranslationResponse, WordTranslation } from '@/api/types'
 import { useVocabularyStore } from '@/stores/vocabulary'
 import { useTranslationStore } from '@/stores/translation'
-import { speak } from '@/services/tts'
+import { isTtsAvailable, speak } from '@/services/tts'
 import IconButton from '@/components/common/IconButton.vue'
 import IconSpeaker from '@/components/icons/IconSpeaker.vue'
 import IconStar from '@/components/icons/IconStar.vue'
@@ -26,6 +26,16 @@ const translationStore = useTranslationStore()
 const result = computed(() => props.response.result as WordTranslation)
 const saved = computed(() => vocabulary.isSaved(result.value.lemma))
 const retranslating = ref(false)
+
+// Local TTS may be unavailable (no speechSynthesis in the webview): the
+// speaker buttons stay visible but disabled with an explanatory tooltip.
+const ttsAvailable = isTtsAvailable()
+const speakUkLabel = computed(() =>
+  ttsAvailable ? t('word.speakUk') : t('word.ttsUnavailable'),
+)
+const speakUsLabel = computed(() =>
+  ttsAvailable ? t('word.speakUs') : t('word.ttsUnavailable'),
+)
 
 const KNOWN_POS = [
   'noun',
@@ -90,14 +100,26 @@ function askText(): string {
       <span class="ipa-block">
         <span class="ipa-accent">UK</span>
         <span class="ipa">{{ result.phonetic_uk || '—' }}</span>
-        <IconButton :label="t('word.speakUk')" size="sm" @click="speak(result.word, 'en-GB')">
+        <IconButton
+          :label="speakUkLabel"
+          size="sm"
+          :disabled="!ttsAvailable"
+          data-testid="speak-uk"
+          @click="speak(result.word, 'en-GB')"
+        >
           <IconSpeaker :size="14" />
         </IconButton>
       </span>
       <span class="ipa-block">
         <span class="ipa-accent">US</span>
         <span class="ipa">{{ result.phonetic_us || '—' }}</span>
-        <IconButton :label="t('word.speakUs')" size="sm" @click="speak(result.word, 'en-US')">
+        <IconButton
+          :label="speakUsLabel"
+          size="sm"
+          :disabled="!ttsAvailable"
+          data-testid="speak-us"
+          @click="speak(result.word, 'en-US')"
+        >
           <IconSpeaker :size="14" />
         </IconButton>
       </span>

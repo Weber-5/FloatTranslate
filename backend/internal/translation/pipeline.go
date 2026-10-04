@@ -12,6 +12,14 @@
 // otherwise the request fails with PROVIDER_NOT_CONFIGURED. The mock
 // provider remains a test fixture injected through llm.Resolver and is never
 // reachable via HTTP.
+//
+// Since Phase 3 the text path is chunked (docs/06 §8): protected spans and
+// terminology are applied to the FULL normalized input first, the masked
+// text is then split by SplitMarkdown and the chunks are translated
+// sequentially with the per-chunk structured output contract. The result is
+// assembled only after every chunk succeeded (all-or-nothing: any chunk
+// failure fails the whole request and nothing is persisted). The word path
+// is unchanged.
 package translation
 
 import (
@@ -80,15 +88,16 @@ func compileSchema(raw string) (*jsonschema.Schema, error) {
 
 // Pipeline wires the translation flow together.
 type Pipeline struct {
-	resolver   llm.Resolver
-	model      func() string
-	terms      *terminology.Service
-	cache      *repository.CacheRepo
-	history    *repository.HistoryRepo
-	settings   *repository.SettingsRepo
-	wordSchema *jsonschema.Schema
-	textSchema *jsonschema.Schema
-	now        func() time.Time
+	resolver    llm.Resolver
+	model       func() string
+	terms       *terminology.Service
+	cache       *repository.CacheRepo
+	history     *repository.HistoryRepo
+	settings    *repository.SettingsRepo
+	wordSchema  *jsonschema.Schema
+	textSchema  *jsonschema.Schema
+	chunkSchema *jsonschema.Schema
+	now         func() time.Time
 }
 
 // Options tweaks a single Translate call.
@@ -114,17 +123,42 @@ func NewPipeline(resolver llm.Resolver, model func() string, terms *terminology.
 	if err != nil {
 		return nil, fmt.Errorf("compile text schema: %w", err)
 	}
+	chunkSchema, err := compileSchema(schemas.TextChunk())
+	if err != nil {
+		return nil, fmt.Errorf("compile text chunk schema: %w", err)
+	}
 	return &Pipeline{
-		resolver:   resolver,
-		model:      model,
-		terms:      terms,
-		cache:      cache,
-		history:    history,
-		settings:   settings,
-		wordSchema: wordSchema,
-		textSchema: textSchema,
-		now:        time.Now,
+		resolver:    resolver,
+		model:       model,
+		terms:       terms,
+		cache:       cache,
+		history:     history,
+		settings:    settings,
+		wordSchema:  wordSchema,
+		textSchema:  textSchema,
+		chunkSchema: chunkSchema,
+		now:         time.Now,
 	}, nil
+}
+
+// runEnv carries the per-request environment shared by the word and text
+// (chunked) translation paths.
+type runEnv struct {
+	provider     llm.Provider
+	model        string
+	systemPrompt string
+	// input is the full normalized input; source_markdown of assembled text
+	// results is this value unchanged.
+	input string
+	// termApplied is the protected-span-masked, terminology-applied full
+	// text — the word path's single provider input and the text path's
+	// chunking source.
+	termApplied  string
+	spans        []protectedspan.Span
+	appliedTerms []repository.TerminologyRow
+	cacheKey     string
+	opts         Options
+	req          dto.TranslationRequest
 }
 
 // Translate runs the full pipeline for one request.
@@ -173,54 +207,90 @@ func (p *Pipeline) Translate(ctx context.Context, req dto.TranslationRequest, op
 		return dto.TranslationResponse{}, mapProviderError(rerr)
 	}
 
-	// Protect spans first, then apply terminology to the masked text so the
-	// replacement can never corrupt protected content (docs/06 §7). The
-	// masked, terminology-applied text is what the provider sees.
+	// Protect spans first, then apply terminology to the masked text. Both
+	// run on the FULL input before chunking (Phase 3 frozen ordering); the
+	// masked, terminology-applied text is what gets chunked.
 	masked := protectedspan.Mask(input)
 	termApplied, appliedTerms := p.terms.Apply(masked.Text)
 	terms := p.terms.Snapshot()
 	systemPrompt := buildSystemPrompt(kind, terms, p.customTranslationPrompt(ctx))
 
-	raw, err := provider.Complete(ctx, llm.CompleteRequest{
-		Model:        model,
-		Kind:         kind,
-		Input:        termApplied,
-		SystemPrompt: systemPrompt,
-		Prompt:       buildUserPrompt(kind, termApplied, p.schemaJSON(kind)),
-		SchemaJSON:   p.schemaJSON(kind),
+	e := &runEnv{
+		provider:     provider,
+		model:        model,
+		systemPrompt: systemPrompt,
+		input:        input,
+		termApplied:  termApplied,
+		spans:        masked.Spans,
+		appliedTerms: appliedTerms,
+		cacheKey:     cacheKey,
+		opts:         opts,
+		req:          req,
+	}
+
+	var payload any
+	var err error
+	if kind == nlp.KindWord {
+		payload, err = p.translateWord(ctx, e)
+	} else {
+		payload, err = p.translateText(ctx, e)
+	}
+	if err != nil {
+		var fb *cacheFallbackError
+		if errors.As(err, &fb) {
+			return fb.resp, nil
+		}
+		return dto.TranslationResponse{}, err
+	}
+	return p.persistAndRespond(ctx, kind, input, req.Text, opts, cacheKey, configHash, model, payload)
+}
+
+// translateWord runs the unchanged single-shot word path: one provider call,
+// schema validation with one repair attempt, protected-span restore with one
+// repair attempt and the terminology post-check with one repair attempt.
+func (p *Pipeline) translateWord(ctx context.Context, e *runEnv) (any, error) {
+	raw, err := e.provider.Complete(ctx, llm.CompleteRequest{
+		Model:        e.model,
+		Kind:         nlp.KindWord,
+		Input:        e.termApplied,
+		SystemPrompt: e.systemPrompt,
+		Prompt:       buildUserPrompt(nlp.KindWord, e.termApplied, p.schemaJSON(nlp.KindWord)),
+		SchemaJSON:   p.schemaJSON(nlp.KindWord),
 	})
 	if err != nil {
-		return p.providerFailed(ctx, err, cacheKey, opts, req, kind)
+		return nil, p.providerFailed(ctx, err, e)
 	}
 
 	// Stage 1: schema validation with exactly one repair attempt (docs/06 §6).
-	payloadMasked, lastRaw, verr := p.completeAndDecode(ctx, provider, kind, systemPrompt, termApplied, model, raw)
+	payloadMasked, lastRaw, verr := p.completeAndDecode(ctx, e, nlp.KindWord, e.systemPrompt,
+		e.termApplied, p.schemaJSON(nlp.KindWord), p.wordSchema, raw)
 	if verr != nil {
-		return dto.TranslationResponse{}, apperr.New(apperr.CodeStructuredOutputInvalid,
+		return nil, apperr.New(apperr.CodeStructuredOutputInvalid,
 			"模型输出不符合约定结构，自动修复后仍然失败", false,
 		).WithDetails(map[string]any{"validation_error": truncate(verr.Error(), maxValidationErrorLen)})
 	}
 
 	// Stage 2: restore protected spans; one repair attempt on placeholder
 	// loss, then TRANSLATION_FAILED (non-retryable) with details.
-	payloadRestored, lost := restoreSpans(kind, payloadMasked, masked.Spans)
+	payloadRestored, lost := restoreSpans(nlp.KindWord, payloadMasked, e.spans)
 	if len(lost) > 0 {
-		repair, rerr2 := provider.Complete(ctx, llm.CompleteRequest{
-			Model:        model,
-			Kind:         kind,
-			Input:        termApplied,
-			SystemPrompt: systemPrompt,
-			Prompt: buildSpanRepairPrompt(kind, lastRaw, missingSpans(masked.Spans, lost),
-				p.schemaJSON(kind)),
-			SchemaJSON: p.schemaJSON(kind),
+		repair, rerr2 := e.provider.Complete(ctx, llm.CompleteRequest{
+			Model:        e.model,
+			Kind:         nlp.KindWord,
+			Input:        e.termApplied,
+			SystemPrompt: e.systemPrompt,
+			Prompt: buildSpanRepairPrompt(nlp.KindWord, lastRaw, missingSpans(e.spans, lost),
+				p.schemaJSON(nlp.KindWord)),
+			SchemaJSON: p.schemaJSON(nlp.KindWord),
 			RepairOf:   lastRaw,
 		})
 		if rerr2 != nil {
-			return p.providerFailed(ctx, rerr2, cacheKey, opts, req, kind)
+			return nil, p.providerFailed(ctx, rerr2, e)
 		}
-		payloadMasked2, lastRaw2, verr2 := p.completeAndDecode(ctx, provider, kind, systemPrompt, termApplied, model, repair)
+		payloadMasked2, lastRaw2, verr2 := p.completeAndDecode(ctx, e, nlp.KindWord, e.systemPrompt,
+			e.termApplied, p.schemaJSON(nlp.KindWord), p.wordSchema, repair)
 		if verr2 != nil {
-			return dto.TranslationResponse{}, apperr.New(apperr.CodeTranslationFailed,
+			return nil, apperr.New(apperr.CodeTranslationFailed,
 				"受保护内容在译文中丢失，自动修复失败", false,
 			).WithDetails(map[string]any{
 				"reason":           "protected_span_lost",
@@ -228,9 +298,9 @@ func (p *Pipeline) Translate(ctx context.Context, req dto.TranslationRequest, op
 				"validation_error": truncate(verr2.Error(), maxValidationErrorLen),
 			})
 		}
-		payloadRestored, lost = restoreSpans(kind, payloadMasked2, masked.Spans)
+		payloadRestored, lost = restoreSpans(nlp.KindWord, payloadMasked2, e.spans)
 		if len(lost) > 0 {
-			return dto.TranslationResponse{}, apperr.New(apperr.CodeTranslationFailed,
+			return nil, apperr.New(apperr.CodeTranslationFailed,
 				"受保护内容在译文中丢失，自动修复后仍然丢失", false,
 			).WithDetails(map[string]any{"reason": "protected_span_lost", "missing": lost})
 		}
@@ -239,23 +309,23 @@ func (p *Pipeline) Translate(ctx context.Context, req dto.TranslationRequest, op
 
 	// Stage 3: terminology post-check (docs/09) on the masked payload so
 	// protected content cannot trigger false violations; one repair attempt.
-	violated := terminology.FindViolations(flattenStrings(payloadMasked), appliedTerms)
-	if len(violated) > 0 {
-		repair, rerr3 := provider.Complete(ctx, llm.CompleteRequest{
-			Model:        model,
-			Kind:         kind,
-			Input:        termApplied,
-			SystemPrompt: systemPrompt,
-			Prompt:       buildTerminologyRepairPrompt(kind, lastRaw, violated, p.schemaJSON(kind)),
-			SchemaJSON:   p.schemaJSON(kind),
+	if violated := terminology.FindViolations(flattenStrings(payloadMasked), e.appliedTerms); len(violated) > 0 {
+		repair, rerr3 := e.provider.Complete(ctx, llm.CompleteRequest{
+			Model:        e.model,
+			Kind:         nlp.KindWord,
+			Input:        e.termApplied,
+			SystemPrompt: e.systemPrompt,
+			Prompt:       buildTerminologyRepairPrompt(nlp.KindWord, lastRaw, violated, p.schemaJSON(nlp.KindWord)),
+			SchemaJSON:   p.schemaJSON(nlp.KindWord),
 			RepairOf:     lastRaw,
 		})
 		if rerr3 != nil {
-			return p.providerFailed(ctx, rerr3, cacheKey, opts, req, kind)
+			return nil, p.providerFailed(ctx, rerr3, e)
 		}
-		payloadMasked3, _, verr3 := p.completeAndDecode(ctx, provider, kind, systemPrompt, termApplied, model, repair)
+		payloadMasked3, _, verr3 := p.completeAndDecode(ctx, e, nlp.KindWord, e.systemPrompt,
+			e.termApplied, p.schemaJSON(nlp.KindWord), p.wordSchema, repair)
 		if verr3 != nil {
-			return dto.TranslationResponse{}, apperr.New(apperr.CodeTranslationFailed,
+			return nil, apperr.New(apperr.CodeTranslationFailed,
 				"译文未遵守术语表，自动修复失败", false,
 			).WithDetails(map[string]any{
 				"reason":           "terminology_violation",
@@ -263,21 +333,214 @@ func (p *Pipeline) Translate(ctx context.Context, req dto.TranslationRequest, op
 				"validation_error": truncate(verr3.Error(), maxValidationErrorLen),
 			})
 		}
-		payloadRestored, lost = restoreSpans(kind, payloadMasked3, masked.Spans)
+		payloadRestored, lost = restoreSpans(nlp.KindWord, payloadMasked3, e.spans)
 		if len(lost) > 0 {
-			return dto.TranslationResponse{}, apperr.New(apperr.CodeTranslationFailed,
+			return nil, apperr.New(apperr.CodeTranslationFailed,
 				"受保护内容在译文中丢失，自动修复后仍然丢失", false,
 			).WithDetails(map[string]any{"reason": "protected_span_lost", "missing": lost})
 		}
-		if v2 := terminology.FindViolations(flattenStrings(payloadMasked3), appliedTerms); len(v2) > 0 {
-			return dto.TranslationResponse{}, apperr.New(apperr.CodeTranslationFailed,
+		if v2 := terminology.FindViolations(flattenStrings(payloadMasked3), e.appliedTerms); len(v2) > 0 {
+			return nil, apperr.New(apperr.CodeTranslationFailed,
 				"译文未遵守术语表，自动修复后仍然违反", false,
 			).WithDetails(map[string]any{"reason": "terminology_violation", "violated": violatedTerms(v2)})
 		}
 	}
 
+	return payloadRestored, nil
+}
+
+// translateText implements the Phase 3 chunked text path (docs/06 §8): the
+// masked, terminology-applied text is split into chunks that are translated
+// SEQUENTIALLY with the per-chunk structured output contract. Each chunk
+// runs the same validate → span-restore → terminology post-check chain with
+// exactly one repair attempt per failure class; a chunk failure fails the
+// whole request (details carry chunk_index) and nothing is persisted. After
+// the last chunk succeeds the result is assembled: translated_markdown is
+// the chunk translations joined with "\n\n", segments are concatenated in
+// chunk order and source_markdown is the original full input unchanged.
+func (p *Pipeline) translateText(ctx context.Context, e *runEnv) (any, error) {
+	chunks := SplitMarkdown(e.termApplied, DefaultChunkBudget)
+	if len(chunks) == 0 {
+		return nil, apperr.New(apperr.CodeTranslationFailed, "长文本分块失败", false)
+	}
+
+	chunkSystem := buildChunkSystemPrompt(e.systemPrompt)
+	chunkSchemaJSON := schemas.TextChunk()
+
+	mdParts := make([]string, 0, len(chunks))
+	var segments []dto.Segment
+	for i, chunk := range chunks {
+		payload, err := p.translateChunk(ctx, e, chunkSystem, chunk, chunkSchemaJSON, i)
+		if err != nil {
+			var appErr *apperr.E
+			if errors.As(err, &appErr) {
+				return nil, err
+			}
+			// Provider-class failure: fall back to the cache when available
+			// ("API 失败但有缓存").
+			return nil, p.providerFailed(ctx, err, e)
+		}
+		m := payload.(map[string]any)
+		mdParts = append(mdParts, m["translated_markdown"].(string))
+		if segs, ok := m["segments"].([]any); ok {
+			for _, seg := range segs {
+				sm := seg.(map[string]any)
+				segments = append(segments, dto.Segment{
+					Source:      sm["source"].(string),
+					Translation: sm["translation"].(string),
+				})
+			}
+		}
+	}
+
+	// Assembled TextTranslation in its decoded-JSON shape (same convention as
+	// the word path and the cache round-trip): source_markdown is the
+	// original full input unchanged, translated_markdown joins the chunk
+	// translations with blank lines, segments are concatenated in chunk order.
+	segmentsAny := make([]any, 0, len(segments))
+	for _, s := range segments {
+		segmentsAny = append(segmentsAny, map[string]any{
+			"source":      s.Source,
+			"translation": s.Translation,
+		})
+	}
+	return map[string]any{
+		"source_markdown":     e.input,
+		"translated_markdown": strings.Join(mdParts, "\n\n"),
+		"segments":            segmentsAny,
+	}, nil
+}
+
+// translateChunk translates one chunk: provider call, per-chunk schema
+// validation with one repair attempt, chunk-scoped protected-span restore
+// with one repair attempt and the terminology post-check with one repair
+// attempt. Provider-class errors are returned unwrapped so the caller can
+// apply the cache fallback; pipeline failures carry chunk_index in details.
+func (p *Pipeline) translateChunk(ctx context.Context, e *runEnv, systemPrompt, chunk, schemaJSON string, chunkIndex int) (any, error) {
+	raw, err := e.provider.Complete(ctx, llm.CompleteRequest{
+		Model:        e.model,
+		Kind:         nlp.KindText,
+		Input:        chunk,
+		SystemPrompt: systemPrompt,
+		Prompt:       buildUserPrompt(nlp.KindText, chunk, schemaJSON),
+		SchemaJSON:   schemaJSON,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	payload, lastRaw, verr := p.completeAndDecode(ctx, e, nlp.KindText, systemPrompt,
+		chunk, schemaJSON, p.chunkSchema, raw)
+	if verr != nil {
+		return nil, apperr.New(apperr.CodeStructuredOutputInvalid,
+			"模型输出不符合约定结构，自动修复后仍然失败", false,
+		).WithDetails(map[string]any{
+			"chunk_index":      chunkIndex,
+			"validation_error": truncate(verr.Error(), maxValidationErrorLen),
+		})
+	}
+
+	// Protected spans: only the placeholders that occur in THIS chunk must
+	// survive in this chunk's output; one repair attempt.
+	relevant := spansInChunk(chunk, e.spans)
+	payloadRestored, lost := restoreChunkSpans(payload, relevant)
+	if len(lost) > 0 {
+		repair, rerr2 := e.provider.Complete(ctx, llm.CompleteRequest{
+			Model:        e.model,
+			Kind:         nlp.KindText,
+			Input:        chunk,
+			SystemPrompt: systemPrompt,
+			Prompt: buildSpanRepairPrompt(nlp.KindText, lastRaw, missingSpans(relevant, lost),
+				schemaJSON),
+			SchemaJSON: schemaJSON,
+			RepairOf:   lastRaw,
+		})
+		if rerr2 != nil {
+			return nil, rerr2
+		}
+		payload2, lastRaw2, verr2 := p.completeAndDecode(ctx, e, nlp.KindText, systemPrompt,
+			chunk, schemaJSON, p.chunkSchema, repair)
+		if verr2 != nil {
+			return nil, apperr.New(apperr.CodeTranslationFailed,
+				"受保护内容在译文中丢失，自动修复失败", false,
+			).WithDetails(map[string]any{
+				"chunk_index":      chunkIndex,
+				"reason":           "protected_span_lost",
+				"missing":          lost,
+				"validation_error": truncate(verr2.Error(), maxValidationErrorLen),
+			})
+		}
+		payloadRestored, lost = restoreChunkSpans(payload2, relevant)
+		if len(lost) > 0 {
+			return nil, apperr.New(apperr.CodeTranslationFailed,
+				"受保护内容在译文中丢失，自动修复后仍然丢失", false,
+			).WithDetails(map[string]any{
+				"chunk_index": chunkIndex,
+				"reason":      "protected_span_lost",
+				"missing":     lost,
+			})
+		}
+		payload, lastRaw = payload2, lastRaw2
+	}
+
+	// Terminology post-check per chunk; one repair attempt.
+	if violated := terminology.FindViolations(flattenStrings(payload), e.appliedTerms); len(violated) > 0 {
+		repair, rerr3 := e.provider.Complete(ctx, llm.CompleteRequest{
+			Model:        e.model,
+			Kind:         nlp.KindText,
+			Input:        chunk,
+			SystemPrompt: systemPrompt,
+			Prompt:       buildTerminologyRepairPrompt(nlp.KindText, lastRaw, violated, schemaJSON),
+			SchemaJSON:   schemaJSON,
+			RepairOf:     lastRaw,
+		})
+		if rerr3 != nil {
+			return nil, rerr3
+		}
+		payload3, _, verr3 := p.completeAndDecode(ctx, e, nlp.KindText, systemPrompt,
+			chunk, schemaJSON, p.chunkSchema, repair)
+		if verr3 != nil {
+			return nil, apperr.New(apperr.CodeTranslationFailed,
+				"译文未遵守术语表，自动修复失败", false,
+			).WithDetails(map[string]any{
+				"chunk_index":      chunkIndex,
+				"reason":           "terminology_violation",
+				"violated":         violatedTerms(violated),
+				"validation_error": truncate(verr3.Error(), maxValidationErrorLen),
+			})
+		}
+		payloadRestored, lost = restoreChunkSpans(payload3, relevant)
+		if len(lost) > 0 {
+			return nil, apperr.New(apperr.CodeTranslationFailed,
+				"受保护内容在译文中丢失，自动修复后仍然丢失", false,
+			).WithDetails(map[string]any{
+				"chunk_index": chunkIndex,
+				"reason":      "protected_span_lost",
+				"missing":     lost,
+			})
+		}
+		if v2 := terminology.FindViolations(flattenStrings(payload3), e.appliedTerms); len(v2) > 0 {
+			return nil, apperr.New(apperr.CodeTranslationFailed,
+				"译文未遵守术语表，自动修复后仍然违反", false,
+			).WithDetails(map[string]any{
+				"chunk_index": chunkIndex,
+				"reason":      "terminology_violation",
+				"violated":    violatedTerms(v2),
+			})
+		}
+		payloadRestored = payload3
+	}
+
+	return payloadRestored, nil
+}
+
+// persistAndRespond marshals the final payload, writes the cache row and the
+// history row and builds the response. It runs only after a fully successful
+// translation (all-or-nothing: no partial results are ever persisted).
+func (p *Pipeline) persistAndRespond(ctx context.Context, kind, input, originalText string, opts Options,
+	cacheKey, configHash, model string, payload any) (dto.TranslationResponse, error) {
 	nowStr := p.now().UTC().Format(time.RFC3339)
-	resultJSON, merr := json.Marshal(payloadRestored)
+	resultJSON, merr := json.Marshal(payload)
 	if merr != nil {
 		return dto.TranslationResponse{}, apperr.Wrap(apperr.CodeTranslationFailed, "翻译结果序列化失败", false, merr)
 	}
@@ -303,7 +566,7 @@ func (p *Pipeline) Translate(ctx context.Context, req dto.TranslationRequest, op
 	histRow := repository.HistoryRow{
 		ID:             id,
 		Kind:           kind,
-		InputText:      req.Text,
+		InputText:      originalText,
 		NormalizedText: input,
 		ResultJSON:     string(resultJSON),
 		Source:         SourceModel,
@@ -312,46 +575,52 @@ func (p *Pipeline) Translate(ctx context.Context, req dto.TranslationRequest, op
 		LastViewedAt:   nowStr,
 	}
 	if opts.HistoryID != "" {
-		err = p.history.UpdateResult(ctx, id, histRow)
-	} else {
-		err = p.history.Insert(ctx, histRow)
-	}
-	if err != nil {
+		err := p.history.UpdateResult(ctx, id, histRow)
+		if err == nil {
+			return p.newResponse(id, kind, SourceModel, payload, model, nowStr), nil
+		}
 		return dto.TranslationResponse{}, apperr.Wrap(apperr.CodeDatabaseError, "写入翻译历史失败", true, err)
 	}
+	if err := p.history.Insert(ctx, histRow); err != nil {
+		return dto.TranslationResponse{}, apperr.Wrap(apperr.CodeDatabaseError, "写入翻译历史失败", true, err)
+	}
+	return p.newResponse(id, kind, SourceModel, payload, model, nowStr), nil
+}
 
+func (p *Pipeline) newResponse(id, kind, source string, result any, model, createdAt string) dto.TranslationResponse {
 	return dto.TranslationResponse{
 		TranslationID: id,
 		Kind:          kind,
-		Source:        SourceModel,
-		Result:        payloadRestored,
+		Source:        source,
+		Result:        result,
 		Model:         model,
-		CreatedAt:     nowStr,
-	}, nil
+		CreatedAt:     createdAt,
+	}
 }
 
 // completeAndDecode runs schema validation for raw and, on failure, the
 // single schema-repair attempt (docs/06 §6). It returns the decoded payload
 // and the raw content of the attempt that produced it.
-func (p *Pipeline) completeAndDecode(ctx context.Context, provider llm.Provider, kind,
-	systemPrompt, termApplied, model string, raw llm.CompleteResponse) (any, string, error) {
-	payload, verr := p.validateAndDecode(kind, raw.Content)
+func (p *Pipeline) completeAndDecode(ctx context.Context, e *runEnv, kind,
+	systemPrompt, input, schemaJSON string, schema *jsonschema.Schema,
+	raw llm.CompleteResponse) (any, string, error) {
+	payload, verr := validateAndDecode(schema, raw.Content)
 	if verr == nil {
 		return payload, raw.Content, nil
 	}
-	repair, rerr := provider.Complete(ctx, llm.CompleteRequest{
-		Model:        model,
+	repair, rerr := e.provider.Complete(ctx, llm.CompleteRequest{
+		Model:        e.model,
 		Kind:         kind,
-		Input:        termApplied,
+		Input:        input,
 		SystemPrompt: systemPrompt,
-		Prompt:       buildSchemaRepairPrompt(kind, raw.Content, p.schemaJSON(kind)),
-		SchemaJSON:   p.schemaJSON(kind),
+		Prompt:       buildSchemaRepairPrompt(kind, raw.Content, schemaJSON),
+		SchemaJSON:   schemaJSON,
 		RepairOf:     raw.Content,
 	})
 	if rerr != nil {
 		return nil, "", rerr
 	}
-	payload, verr = p.validateAndDecode(kind, repair.Content)
+	payload, verr = validateAndDecode(schema, repair.Content)
 	if verr != nil {
 		return nil, "", verr
 	}
@@ -395,20 +664,30 @@ func (p *Pipeline) fromCache(ctx context.Context, row repository.CacheRow, opts 
 	}, nil
 }
 
-// providerFailed implements "API 失败但有缓存：展示缓存并标注本地缓存";
-// without a cache the provider error is mapped to a retryable standard error.
-func (p *Pipeline) providerFailed(ctx context.Context, err error, cacheKey string, opts Options,
-	req dto.TranslationRequest, kind string) (dto.TranslationResponse, error) {
+// cacheFallbackError carries a fully built cache-sourced response through the
+// (payload, error) translation paths. When Translate sees it, the response is
+// returned as-is ("API 失败但有缓存：展示缓存并标注本地缓存"): the fromCache
+// helper has already recorded the history row, so nothing is persisted again.
+type cacheFallbackError struct {
+	resp dto.TranslationResponse
+}
+
+func (e *cacheFallbackError) Error() string { return "provider failed, serving cached translation" }
+
+// providerFailed maps a provider error and, when a cache row exists, wraps the
+// cached response in a cacheFallbackError; without a cache the provider error
+// is mapped to a retryable standard error.
+func (p *Pipeline) providerFailed(ctx context.Context, err error, e *runEnv) error {
 	mapped := mapProviderError(err)
-	if row, cerr := p.cache.Get(ctx, cacheKey); cerr == nil {
-		if resp, ferr := p.fromCache(ctx, row, opts, req.Text); ferr == nil {
+	if row, cerr := p.cache.Get(ctx, e.cacheKey); cerr == nil {
+		if resp, ferr := p.fromCache(ctx, row, e.opts, e.req.Text); ferr == nil {
 			// Only the stable error code is logged — never the raw cause.
 			slog.WarnContext(ctx, "provider failed, serving cached translation",
 				"code", string(apperr.AsE(mapped).Code))
-			return resp, nil
+			return &cacheFallbackError{resp: resp}
 		}
 	}
-	return dto.TranslationResponse{}, mapped
+	return mapped
 }
 
 func mapProviderError(err error) error {
@@ -423,20 +702,11 @@ func mapProviderError(err error) error {
 }
 
 // validateAndDecode decodes the raw provider payload and validates it
-// against the embedded schema for kind.
-func (p *Pipeline) validateAndDecode(kind, raw string) (any, error) {
+// against the given embedded schema.
+func validateAndDecode(schema *jsonschema.Schema, raw string) (any, error) {
 	var v any
 	if err := json.Unmarshal([]byte(raw), &v); err != nil {
 		return nil, fmt.Errorf("payload is not valid JSON: %w", err)
-	}
-	var schema *jsonschema.Schema
-	switch kind {
-	case nlp.KindWord:
-		schema = p.wordSchema
-	case nlp.KindText:
-		schema = p.textSchema
-	default:
-		return nil, fmt.Errorf("unknown kind %q", kind)
 	}
 	if err := schema.Validate(v); err != nil {
 		return nil, err
@@ -504,6 +774,39 @@ func restoreSpans(kind string, payload any, spans []protectedspan.Span) (any, []
 		}
 	}
 	return restoreDeep(payload, spans), lost
+}
+
+// spansInChunk returns the spans whose placeholders occur in chunk. Only
+// these must survive this chunk's translation (chunk-scoped coverage).
+func spansInChunk(chunk string, spans []protectedspan.Span) []protectedspan.Span {
+	if len(spans) == 0 {
+		return nil
+	}
+	lower := strings.ToLower(chunk)
+	var out []protectedspan.Span
+	for _, sp := range spans {
+		if strings.Contains(lower, strings.ToLower(sp.Placeholder)) {
+			out = append(out, sp)
+		}
+	}
+	return out
+}
+
+// restoreChunkSpans restores placeholders in a chunk payload and reports the
+// chunk's placeholders missing from the translation surface. Coverage is
+// evaluated on the pre-restore payload.
+func restoreChunkSpans(payload any, relevant []protectedspan.Span) (any, []string) {
+	if len(relevant) == 0 {
+		return payload, nil
+	}
+	surface := strings.ToLower(translationSurface(payload))
+	var lost []string
+	for _, sp := range relevant {
+		if !strings.Contains(surface, strings.ToLower(sp.Placeholder)) {
+			lost = append(lost, sp.Placeholder)
+		}
+	}
+	return restoreDeep(payload, relevant), lost
 }
 
 // translationSurface joins the translation-bearing fields of a text payload:

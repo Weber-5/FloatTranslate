@@ -35,8 +35,10 @@ export default {
   },
 
   tabs: {
-    newTab: '新标签页',
+    newTab: '新建标签页',
     openNew: '新建标签页',
+    openNewShortcut: '新建标签页（Ctrl+T）',
+    keysHint: '快捷键：Ctrl+T 新建标签页 · Ctrl+W 关闭当前标签页',
     close: '关闭标签页',
     kindWord: '词',
     kindText: '文',
@@ -78,6 +80,7 @@ export default {
     inVocabulary: '已收藏',
     speakUk: '英式发音',
     speakUs: '美式发音',
+    ttsUnavailable: '当前设备不支持语音朗读',
     inflections: '词形变化',
     synonyms: '同义词',
     pos: {
@@ -96,6 +99,9 @@ export default {
 
   text: {
     clickHint: '提示：点击原文中的英文单词可继续查词',
+    copyAll: '复制全部译文',
+    copySegment: '复制本段译文',
+    copied: '已复制',
   },
 
   vocab: {
@@ -150,7 +156,11 @@ export default {
       hotkeys: '快捷键',
       hotkeyToggle: '显示 / 隐藏主窗口',
       hotkeyQuick: '快速翻译选中文本',
-      hotkeysHint: '自定义快捷键将在后续版本提供。',
+      hotkeyRecordHint: '点击后按下新组合键；Esc 取消，Backspace 清除',
+      hotkeyRecording: '按下组合键…',
+      hotkeyEmpty: '未设置',
+      hotkeyNeedModifier: '组合键需至少包含一个修饰键（Ctrl/Alt/Shift/Win）',
+      hotkeyConflict: '快捷键冲突：{conflict} 已被其他程序占用',
     },
     provider: {
       mode: '模式',

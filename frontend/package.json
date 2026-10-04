@@ -13,6 +13,7 @@
     "test": "vitest run",
     "lint": "eslint .",
     "typecheck": "vue-tsc -b",
+    "audit:i18n": "node scripts/audit-i18n-keys.cjs",
     "format": "prettier --write ."
   },
   "dependencies": {

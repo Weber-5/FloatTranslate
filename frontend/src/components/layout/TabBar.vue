@@ -1,7 +1,8 @@
 <script setup lang="ts">
 /**
  * Browser-like tab bar: horizontal scroll/compress, drag reorder,
- * per-tab close, "+" new tab (docs/03 §6). Tabs are word/text only.
+ * middle-click close, per-tab close, "+" new tab (docs/03 §6).
+ * Tabs are word/text only; Ctrl+T/Ctrl+W work app-wide (AppShell).
  */
 import { ref } from 'vue'
 import { useI18n } from 'vue-i18n'
@@ -29,10 +30,23 @@ function onDrop(index: number): void {
 function onDragEnd(): void {
   dragIndex.value = null
 }
+
+/** Middle-click (auxclick button 1) closes the tab like in a browser. */
+function onTabAuxClick(id: string, event: MouseEvent): void {
+  if (event.button !== 1) return
+  event.preventDefault()
+  tabsStore.close(id)
+}
 </script>
 
 <template>
-  <div class="tabbar" role="tablist" :aria-label="t('tabs.openNew')">
+  <div
+    class="tabbar"
+    role="tablist"
+    :aria-label="t('tabs.openNew')"
+    :title="t('tabs.keysHint')"
+    data-testid="tab-bar"
+  >
     <div
       v-for="(tab, index) in tabsStore.tabs"
       :key="tab.id"
@@ -45,6 +59,7 @@ function onDragEnd(): void {
       data-testid="tab-item"
       @click="tabsStore.activate(tab.id)"
       @keydown.enter="tabsStore.activate(tab.id)"
+      @auxclick="onTabAuxClick(tab.id, $event)"
       @dragstart="onDragStart(index)"
       @dragover.prevent
       @drop="onDrop(index)"
@@ -63,7 +78,7 @@ function onDragEnd(): void {
         <IconClose :size="12" />
       </IconButton>
     </div>
-    <IconButton :label="t('tabs.openNew')" class="tab-new" @click="tabsStore.newTab()">
+    <IconButton :label="t('tabs.openNewShortcut')" class="tab-new" @click="tabsStore.newTab()">
       <IconPlus :size="16" />
     </IconButton>
   </div>

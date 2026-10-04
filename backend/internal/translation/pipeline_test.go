@@ -299,15 +299,19 @@ func TestTerminologyAppliedToPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("translate: %v", err)
 	}
-	// The mock echoes its input back into the text result; it must contain
-	// the terminology replacement, not the raw source term.
+	// source_markdown is the original input unchanged; the terminology
+	// replacement must appear in the translated surface (the mock echoes its
+	// terminology-applied input back into the translation).
 	text := resp.Result.(map[string]any)
-	source := text["source_markdown"].(string)
-	if strings.Contains(source, "FloatTranslate is great") {
-		t.Errorf("terminology was not applied: %q", source)
+	if text["source_markdown"] != "FloatTranslate is great" {
+		t.Errorf("source_markdown = %v, want the original input unchanged", text["source_markdown"])
 	}
-	if !strings.Contains(source, "浮动翻译 is great") {
-		t.Errorf("expected terminology replacement in: %q", source)
+	translated := text["translated_markdown"].(string)
+	if strings.Contains(translated, "FloatTranslate is great") {
+		t.Errorf("terminology was not applied in translation: %q", translated)
+	}
+	if !strings.Contains(translated, "浮动翻译 is great") {
+		t.Errorf("expected terminology replacement in: %q", translated)
 	}
 }
 
@@ -408,16 +412,17 @@ func (s *scriptProvider) requests() []llm.CompleteRequest {
 	return out
 }
 
-// textPayload builds a schema-valid TextTranslation payload.
-func textPayload(sourceMarkdown, translatedMarkdown string, segmentTranslations ...string) string {
+// textPayload builds a schema-valid per-chunk text payload (Phase 3 contract:
+// {"translated_markdown", "segments"}; source_markdown is assembled by the
+// pipeline and never returned by the model).
+func textPayload(source, translatedMarkdown string, segmentTranslations ...string) string {
 	segments := make([]dto.Segment, 0, len(segmentTranslations))
 	for _, tr := range segmentTranslations {
-		segments = append(segments, dto.Segment{Source: sourceMarkdown, Translation: tr})
+		segments = append(segments, dto.Segment{Source: source, Translation: tr})
 	}
-	raw, err := json.Marshal(dto.TextTranslation{
-		SourceMarkdown:     sourceMarkdown,
-		TranslatedMarkdown: translatedMarkdown,
-		Segments:           segments,
+	raw, err := json.Marshal(map[string]any{
+		"translated_markdown": translatedMarkdown,
+		"segments":            segments,
 	})
 	if err != nil {
 		panic(err)
@@ -736,5 +741,345 @@ func TestWordKindProtectedNumberRestored(t *testing.T) {
 	word := resp.Result.(map[string]any)
 	if word["word"] != "COVID19" {
 		t.Errorf("word = %v, want COVID19 restored", word["word"])
+	}
+}
+
+// --- Phase 3: long text chunking ---
+
+// chunkEchoProvider is a Phase 3 test provider for chunked requests: it
+// echoes req.Input (the chunk) back as the per-chunk payload and records
+// every call in order. Selected calls can be scripted to fail, return
+// invalid JSON, return a raw payload or strip a placeholder from the echo.
+type chunkEchoProvider struct {
+	mu      sync.Mutex
+	failOn  map[int]error
+	invalid map[int]bool
+	raw     map[int]string
+	strip   map[int]string
+	calls   int
+	inputs  []string
+	prompts []string
+}
+
+func newChunkEchoProvider() *chunkEchoProvider {
+	return &chunkEchoProvider{
+		failOn: map[int]error{}, invalid: map[int]bool{},
+		raw: map[int]string{}, strip: map[int]string{},
+	}
+}
+
+func (c *chunkEchoProvider) Complete(_ context.Context, req llm.CompleteRequest) (llm.CompleteResponse, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	i := c.calls
+	c.calls++
+	c.inputs = append(c.inputs, req.Input)
+	c.prompts = append(c.prompts, req.Prompt)
+	if err, ok := c.failOn[i]; ok {
+		return llm.CompleteResponse{}, err
+	}
+	if content, ok := c.raw[i]; ok {
+		return llm.CompleteResponse{Content: content}, nil
+	}
+	input := req.Input
+	if ph, ok := c.strip[i]; ok {
+		input = strings.ReplaceAll(input, ph, "")
+	}
+	if c.invalid[i] {
+		return llm.CompleteResponse{Content: `{"unexpected":true}`}, nil
+	}
+	payload, err := json.Marshal(map[string]any{
+		"translated_markdown": "【译】" + input,
+		"segments":            []dto.Segment{{Source: input, Translation: "【译】" + input}},
+	})
+	if err != nil {
+		return llm.CompleteResponse{}, llm.ErrUnavailable
+	}
+	return llm.CompleteResponse{Content: string(payload)}, nil
+}
+
+func (c *chunkEchoProvider) Capabilities() llm.Capabilities {
+	return llm.Capabilities{SupportsThinking: true, SupportsStructuredOutput: true}
+}
+
+func (c *chunkEchoProvider) callCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calls
+}
+
+func (c *chunkEchoProvider) requestInputs() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.inputs...)
+}
+
+func (c *chunkEchoProvider) requestPrompts() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.prompts...)
+}
+
+// threeParagraphs builds three identical ~1380-rune paragraphs: each fits the
+// 1800 budget, any two together do not, so the frozen chunking yields exactly
+// three chunks in order.
+func threeParagraphs() string {
+	para := repeatSentence(30)
+	return para + "\n\n" + para + "\n\n" + para
+}
+
+func newChunkHarness(t *testing.T, provider llm.Provider) *harness {
+	t.Helper()
+	h := newHarness(t)
+	p, err := NewPipeline(llm.FixedResolver{P: provider}, func() string { return DefaultTranslationModel },
+		h.terms, h.cache, h.history, h.settings)
+	if err != nil {
+		t.Fatalf("pipeline: %v", err)
+	}
+	h.pipeline = p
+	return h
+}
+
+func countCacheRows(t *testing.T, h *harness) int {
+	t.Helper()
+	var n int
+	if err := h.db.QueryRow("SELECT COUNT(*) FROM translation_cache").Scan(&n); err != nil {
+		t.Fatalf("count cache rows: %v", err)
+	}
+	return n
+}
+
+func TestChunkedTextPipelineEndToEnd(t *testing.T) {
+	provider := newChunkEchoProvider()
+	h := newChunkHarness(t, provider)
+
+	input := threeParagraphs()
+	// The pipeline chunks, caches and stores the NORMALIZED input (outer
+	// whitespace trimmed); chunks come from that masked-normalized text.
+	norm := nlp.NormalizeInput(input)
+	wantChunks := SplitMarkdown(norm, DefaultChunkBudget)
+	if len(wantChunks) != 3 {
+		t.Fatalf("precondition: expected 3 chunks, got %d", len(wantChunks))
+	}
+
+	resp, err := h.pipeline.Translate(context.Background(), dto.TranslationRequest{Text: input}, Options{})
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	if resp.Kind != nlp.KindText || resp.Source != SourceModel || resp.Model != DefaultTranslationModel {
+		t.Errorf("kind/source/model = %s/%s/%s", resp.Kind, resp.Source, resp.Model)
+	}
+
+	// Exactly one provider call per chunk, sequential and in order.
+	inputs := provider.requestInputs()
+	if len(inputs) != len(wantChunks) {
+		t.Fatalf("provider calls = %d, want %d", len(inputs), len(wantChunks))
+	}
+	for i := range wantChunks {
+		if inputs[i] != wantChunks[i] {
+			t.Errorf("chunk %d input mismatch:\n got %q\nwant %q", i, inputs[i], wantChunks[i])
+		}
+	}
+
+	// Assembled result: the normalized full input unchanged, ordered chunk
+	// translations and segments aligned to the chunks.
+	result := resp.Result.(map[string]any)
+	if result["source_markdown"] != norm {
+		t.Errorf("source_markdown must be the full input unchanged")
+	}
+	wantMD := make([]string, 0, len(wantChunks))
+	for _, c := range wantChunks {
+		wantMD = append(wantMD, "【译】"+c)
+	}
+	if result["translated_markdown"] != strings.Join(wantMD, "\n\n") {
+		t.Errorf("translated_markdown is not the ordered chunk translations joined with blank lines")
+	}
+	segs := result["segments"].([]any)
+	if len(segs) != len(wantChunks) {
+		t.Fatalf("segments = %d, want %d", len(segs), len(wantChunks))
+	}
+	for i, seg := range segs {
+		sm := seg.(map[string]any)
+		if sm["source"] != wantChunks[i] {
+			t.Errorf("segment %d source not aligned to chunk %d", i, i)
+		}
+	}
+
+	// Exactly one cache entry keyed on the FULL normalized input and one
+	// history row.
+	if n := countCacheRows(t, h); n != 1 {
+		t.Errorf("cache rows = %d, want 1 (single entry for the full input)", n)
+	}
+	if _, err := h.cache.Get(context.Background(), CacheKey(norm, nlp.KindText,
+		DefaultTranslationModel, ConfigHash(DefaultTranslationModel, nil))); err != nil {
+		t.Errorf("cache row keyed on the full input missing: %v", err)
+	}
+	if n := countHistory(t, h); n != 1 {
+		t.Errorf("history rows = %d, want 1", n)
+	}
+}
+
+func TestChunkedInputIsProtectedAndPromptsCarryChunks(t *testing.T) {
+	input := threeParagraphs() + "\n\nVisit https://example.com/guide today for more."
+	provider := newChunkEchoProvider()
+	h := newChunkHarness(t, provider)
+
+	resp, err := h.pipeline.Translate(context.Background(), dto.TranslationRequest{Text: input}, Options{})
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	prompts := provider.requestPrompts()
+	if len(prompts) == 0 {
+		t.Fatal("no prompts recorded")
+	}
+	if strings.Contains(prompts[0], "https://example.com/guide") {
+		t.Errorf("first chunk prompt must not contain later protected content: %q", prompts[0])
+	}
+	found := false
+	for _, pr := range prompts {
+		if strings.Contains(pr, protectedspan.PlaceholderPrefix) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no chunk prompt carried the protected placeholder")
+	}
+	out := resp.Result.(map[string]any)["translated_markdown"].(string)
+	if !strings.Contains(out, "https://example.com/guide") {
+		t.Errorf("restored translation missing the protected URL: %q", out)
+	}
+	if strings.Contains(out, protectedspan.PlaceholderPrefix) {
+		t.Errorf("placeholder leaked into the assembled result: %q", out)
+	}
+}
+
+func TestChunkProviderFailurePersistsNothing(t *testing.T) {
+	provider := newChunkEchoProvider()
+	provider.failOn[1] = llm.ErrConnection // second chunk fails
+	h := newChunkHarness(t, provider)
+
+	_, err := h.pipeline.Translate(context.Background(),
+		dto.TranslationRequest{Text: threeParagraphs()}, Options{})
+	if err == nil {
+		t.Fatal("any chunk failure must fail the whole request")
+	}
+	if c, retryable := code(t, err); c != apperr.CodeProviderConnectionFailed || !retryable {
+		t.Errorf("code = %s retryable = %v, want PROVIDER_CONNECTION_FAILED retryable", c, retryable)
+	}
+	if provider.callCount() != 2 {
+		t.Errorf("calls = %d, want 2 (sequential: stop at the failed chunk)", provider.callCount())
+	}
+	if n := countCacheRows(t, h); n != 0 {
+		t.Errorf("cache rows = %d, want 0 (no partial results persisted)", n)
+	}
+	if n := countHistory(t, h); n != 0 {
+		t.Errorf("history rows = %d, want 0 (no partial results persisted)", n)
+	}
+}
+
+func TestChunkInvalidPayloadFailsWithChunkIndex(t *testing.T) {
+	provider := newChunkEchoProvider()
+	// Second chunk returns schema-invalid JSON and so does its single
+	// schema-repair attempt (provider call index 2).
+	provider.invalid[1] = true
+	provider.invalid[2] = true
+	h := newChunkHarness(t, provider)
+
+	_, err := h.pipeline.Translate(context.Background(),
+		dto.TranslationRequest{Text: threeParagraphs()}, Options{})
+	if err == nil {
+		t.Fatal("expected STRUCTURED_OUTPUT_INVALID")
+	}
+	e := apperr.AsE(err)
+	if e.Code != apperr.CodeStructuredOutputInvalid || e.Retryable {
+		t.Errorf("code = %s retryable = %v, want STRUCTURED_OUTPUT_INVALID non-retryable", e.Code, e.Retryable)
+	}
+	if idx, ok := e.Details["chunk_index"].(int); !ok || idx != 1 {
+		t.Errorf("details.chunk_index = %v, want 1", e.Details["chunk_index"])
+	}
+	// chunk 1 call + its single schema repair attempt (which is also invalid).
+	if provider.callCount() != 3 {
+		t.Errorf("calls = %d, want 3", provider.callCount())
+	}
+	if n := countCacheRows(t, h); n != 0 {
+		t.Errorf("cache rows = %d, want 0", n)
+	}
+	if n := countHistory(t, h); n != 0 {
+		t.Errorf("history rows = %d, want 0", n)
+	}
+}
+
+func TestChunkedSpanLossRepairedAndRestored(t *testing.T) {
+	input := threeParagraphs() + "\n\nVisit https://example.com/guide today for more."
+	masked := protectedspan.Mask(input)
+	if len(masked.Spans) != 1 {
+		t.Fatalf("expected exactly 1 protected span, got %d", len(masked.Spans))
+	}
+	// Locate the chunk that carries the placeholder (the tail paragraph may
+	// merge into the last long chunk).
+	chunks := SplitMarkdown(masked.Text, DefaultChunkBudget)
+	spanChunk := -1
+	for i, c := range chunks {
+		if strings.Contains(c, masked.Spans[0].Placeholder) {
+			spanChunk = i
+		}
+	}
+	if spanChunk < 0 {
+		t.Fatal("placeholder chunk not found")
+	}
+
+	provider := newChunkEchoProvider()
+	provider.strip[spanChunk] = masked.Spans[0].Placeholder // drops it initially
+	h := newChunkHarness(t, provider)
+
+	resp, err := h.pipeline.Translate(context.Background(), dto.TranslationRequest{Text: input}, Options{})
+	if err != nil {
+		t.Fatalf("chunk-scoped span repair should succeed: %v", err)
+	}
+	// One call per chunk + the single span repair call.
+	if provider.callCount() != len(chunks)+1 {
+		t.Errorf("calls = %d, want %d", provider.callCount(), len(chunks)+1)
+	}
+	out := resp.Result.(map[string]any)["translated_markdown"].(string)
+	if !strings.Contains(out, "https://example.com/guide") {
+		t.Errorf("repaired result missing restored URL: %q", out)
+	}
+}
+
+func TestRetranslateLongTextRechunks(t *testing.T) {
+	provider := newChunkEchoProvider()
+	h := newChunkHarness(t, provider)
+	ctx := context.Background()
+	input := threeParagraphs()
+
+	first, err := h.pipeline.Translate(ctx, dto.TranslationRequest{Text: input}, Options{})
+	if err != nil {
+		t.Fatalf("first translate: %v", err)
+	}
+	if provider.callCount() != 3 {
+		t.Fatalf("first translate calls = %d, want 3", provider.callCount())
+	}
+
+	// Retranslate bypasses the cache and re-runs chunking, updating the same
+	// history row in place.
+	second, err := h.pipeline.Translate(ctx,
+		dto.TranslationRequest{Text: input, BypassCache: true}, Options{HistoryID: first.TranslationID})
+	if err != nil {
+		t.Fatalf("retranslate: %v", err)
+	}
+	if provider.callCount() != 6 {
+		t.Errorf("retranslate must re-chunk, calls = %d, want 6", provider.callCount())
+	}
+	if second.TranslationID != first.TranslationID {
+		t.Errorf("retranslate must update the same history row")
+	}
+	if second.Source != SourceModel {
+		t.Errorf("retranslate source = %s, want model", second.Source)
+	}
+	if n := countHistory(t, h); n != 1 {
+		t.Errorf("history rows = %d, want 1 (updated in place)", n)
+	}
+	if n := countCacheRows(t, h); n != 1 {
+		t.Errorf("cache rows = %d, want 1 (overwritten in place)", n)
 	}
 }

@@ -76,6 +76,7 @@ func TestEmbeddedSchemasAreNonEmptyJSONObjects(t *testing.T) {
 	for name, raw := range map[string]string{
 		"word_translation.schema.json": WordTranslation(),
 		"text_translation.schema.json": TextTranslation(),
+		"text_chunk.schema.json":       TextChunk(),
 	} {
 		trimmed := strings.TrimSpace(raw)
 		if !strings.HasPrefix(trimmed, "{") || !strings.HasSuffix(trimmed, "}") {

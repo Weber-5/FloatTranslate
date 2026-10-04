@@ -12,6 +12,7 @@ import AiSidebar from './AiSidebar.vue'
 import HistoryDrawer from './HistoryDrawer.vue'
 import { useUiStore } from '@/stores/ui'
 import { useTranslationStore } from '@/stores/translation'
+import { handleTabShortcut } from '@/composables/useTabShortcuts'
 import { useDebouncedTabsPersist } from '@/composables/useDebouncedTabsPersist'
 
 const ui = useUiStore()
@@ -22,13 +23,20 @@ function onBeforeUnload(): void {
   void flushPersist()
 }
 
+/** Ctrl+T / Ctrl+W tab management (tooltip on the tab bar documents it). */
+function onKeyDown(event: KeyboardEvent): void {
+  if (handleTabShortcut(event)) event.preventDefault()
+}
+
 onMounted(() => {
   window.addEventListener('beforeunload', onBeforeUnload)
+  window.addEventListener('keydown', onKeyDown)
   void translationStore.restoreTabsWithHydration()
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('beforeunload', onBeforeUnload)
+  window.removeEventListener('keydown', onKeyDown)
 })
 </script>
 

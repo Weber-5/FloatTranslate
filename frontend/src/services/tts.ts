@@ -13,11 +13,14 @@ export function speak(text: string, accent: SpeechAccent): void {
   synth.cancel()
   const utterance = new SpeechSynthesisUtterance(text)
   utterance.lang = accent
+  // Prefer an installed voice matching the requested accent, then any
+  // English voice; when none is installed the lang tag still steers the
+  // WebView2 default voice.
   const voices = synth.getVoices()
   const voice =
-    voices.find((candidate) => candidate.lang === accent) ??
+    voices.find((candidate) => candidate.lang.replace('_', '-') === accent) ??
     voices.find((candidate) => candidate.lang.replace('_', '-').startsWith(accent.slice(0, 2)))
   if (voice) utterance.voice = voice
-  utterance.rate = 0.95
+  utterance.rate = 1.0
   synth.speak(utterance)
 }

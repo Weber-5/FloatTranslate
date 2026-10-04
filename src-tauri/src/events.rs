@@ -18,10 +18,12 @@ pub const BACKEND_FAILED: &str = "backend-failed";
 /// settings. No payload.
 pub const OPEN_SETTINGS: &str = "open-settings";
 
-/// Reserved for Phase 3 selection capture.
+/// Selection capture completed (Phase 3, docs/07 §5).
 ///
-/// Payload will be `{ "text": string }` (docs/07 §5).
-#[allow(dead_code)]
+/// Emitted to the main window only after a successful capture, and only after
+/// the window has been woken (shown + focused).
+///
+/// Payload: `{ "text": string }`
 pub const SELECTION_CAPTURED: &str = "selection-captured";
 
 /// Payload for [`BACKEND_STATUS`].
@@ -35,4 +37,10 @@ pub struct BackendStatusPayload {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct BackendFailedPayload {
     pub message: String,
+}
+
+/// Payload for [`SELECTION_CAPTURED`] (frozen contract: `{ "text": string }`).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SelectionCapturedPayload {
+    pub text: String,
 }

@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://floattranslate.local/schema/text-chunk.json",
+  "title": "TextChunkTranslation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "translated_markdown",
+    "segments"
+  ],
+  "properties": {
+    "translated_markdown": {
+      "type": "string"
+    },
+    "segments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source",
+          "translation"
+        ],
+        "properties": {
+          "source": {
+            "type": "string"
+          },
+          "translation": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

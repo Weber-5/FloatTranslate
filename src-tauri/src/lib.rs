@@ -12,8 +12,11 @@
 //! 5. the main window geometry is restored from `<data_root>/window-state.json`.
 
 // These modules are public so integration tests in `tests/` can exercise the
-// sidecar handshake, data-root resolution and geometry persistence directly.
+// sidecar handshake, data-root resolution, geometry persistence, hotkey
+// parsing and the capture state machine directly.
 pub mod data_root;
+pub mod hotkey;
+pub mod selection;
 pub mod sidecar;
 pub mod token;
 pub mod window_state;
@@ -21,8 +24,6 @@ pub mod window_state;
 mod autostart;
 mod commands;
 mod events;
-mod hotkey;
-mod selection;
 mod tray;
 
 use std::io::Write;
@@ -46,6 +47,10 @@ pub struct AppState {
     /// Current always-on-top preference (config default true; a later phase
     /// adds the settings toggle).
     pub always_on_top: AtomicBool,
+    /// Global hotkey registrations (Phase 3). Rust is the registration
+    /// authority; nothing is registered until the frontend invokes the
+    /// `apply_hotkeys` command.
+    pub hotkeys: hotkey::HotkeyManager,
 }
 
 /// Runs the Tauri application. Only returns on fatal startup errors or after
@@ -57,6 +62,16 @@ pub fn run() {
             log_line("second instance detected; focusing existing window");
             show_main_window(app);
         }))
+        // Global hotkeys (docs/07 §4). One plugin-level handler dispatches by
+        // comparing against the currently applied bindings; nothing is
+        // registered until the frontend invokes `apply_hotkeys`.
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, shortcut, event| {
+                    hotkey::handle_shortcut_event(app, shortcut, event);
+                })
+                .build(),
+        )
         .setup(setup_app)
         .on_window_event(|window, event| {
             if window.label() != "main" {
@@ -74,7 +89,10 @@ pub fn run() {
                 let _ = window.hide();
             }
         })
-        .invoke_handler(tauri::generate_handler![commands::get_backend_config]);
+        .invoke_handler(tauri::generate_handler![
+            commands::get_backend_config,
+            commands::apply_hotkeys
+        ]);
 
     let app = match builder.build(tauri::generate_context!()) {
         Ok(app) => app,
@@ -157,6 +175,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         token,
         backend: supervisor,
         always_on_top: AtomicBool::new(always_on_top),
+        hotkeys: hotkey::HotkeyManager::with_app_handle(handle.clone()),
     });
 
     tray::create_tray(&handle)?;
@@ -241,12 +260,15 @@ fn persist_window_state(window: &WebviewWindow, state: &AppState) {
     }
 }
 
-/// Final cleanup on `RunEvent::Exit`: persist geometry, terminate the sidecar
-/// child, then let the process exit (code 0 for tray-initiated quits).
+/// Final cleanup on `RunEvent::Exit`: unregister hotkeys, persist geometry,
+/// terminate the sidecar child, then let the process exit (code 0 for
+/// tray-initiated quits).
 fn on_app_exit(app_handle: &AppHandle) {
     let Some(state) = app_handle.try_state::<AppState>() else {
         return;
     };
+    state.hotkeys.unregister_all();
+    log_line("global hotkeys unregistered");
     if let Some(window) = app_handle.get_webview_window("main") {
         persist_window_state(&window, &state);
     }
@@ -270,6 +292,22 @@ pub(crate) fn toggle_main_window(app: &AppHandle) {
         return;
     };
     if window.is_visible().unwrap_or(false) {
+        let _ = window.hide();
+    } else {
+        show_main_window(app);
+    }
+}
+
+/// Show/hide hotkey toggle (frozen contract): hide only when the window is
+/// BOTH visible and focused; otherwise show + focus (un-minimize if needed).
+/// A visible but unfocused window is brought to the front instead of hidden.
+pub(crate) fn toggle_main_window_for_hotkey(app: &AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let visible = window.is_visible().unwrap_or(false);
+    let focused = window.is_focused().unwrap_or(false);
+    if visible && focused {
         let _ = window.hide();
     } else {
         show_main_window(app);

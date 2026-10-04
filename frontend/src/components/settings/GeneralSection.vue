@@ -1,13 +1,19 @@
 <script setup lang="ts">
 /**
- * General settings: theme, always-on-top, auto start (host placeholders),
- * hotkeys display-only (docs/00 §9).
+ * General settings: theme, always-on-top, auto start, hotkey recorder
+ * (docs/00 §9, docs/07 §4). Hotkey save sequence (frozen contract):
+ * invoke apply_hotkeys FIRST — only when it reports registered do we PUT
+ * the settings; on conflict we keep the previous value and show an inline
+ * error, so the previous registrations remain active.
  */
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { ThemeMode } from '@/api/types'
 import { useSettingsStore } from '@/stores/settings'
+import { applyHotkeys } from '@/services/hotkeys'
+import { DEFAULT_HOTKEY_QUICK_TRANSLATE, DEFAULT_HOTKEY_TOGGLE } from '@/constants'
 import SettingRow from './SettingRow.vue'
+import HotkeyInput from './HotkeyInput.vue'
 
 const { t } = useI18n()
 const settings = useSettingsStore()
@@ -15,6 +21,46 @@ const settings = useSettingsStore()
 const theme = computed<ThemeMode>(() => settings.app?.theme ?? 'system')
 const alwaysOnTop = computed(() => settings.app?.always_on_top ?? false)
 const autoStart = computed(() => settings.app?.auto_start ?? false)
+
+const hotkeyToggle = computed(
+  () => settings.app?.hotkey_toggle_window ?? DEFAULT_HOTKEY_TOGGLE,
+)
+const hotkeyQuick = computed(
+  () => settings.app?.hotkey_quick_translate ?? DEFAULT_HOTKEY_QUICK_TRANSLATE,
+)
+
+type HotkeyField = 'hotkey_toggle_window' | 'hotkey_quick_translate'
+
+const hotkeySaving = ref<HotkeyField | null>(null)
+const hotkeyConflict = ref<string | null>(null)
+
+async function onHotkeyCommit(field: HotkeyField, value: string): Promise<void> {
+  const app = settings.app
+  if (!app || hotkeySaving.value !== null) return
+  if (value === (app[field] ?? (field === 'hotkey_toggle_window' ? DEFAULT_HOTKEY_TOGGLE : DEFAULT_HOTKEY_QUICK_TRANSLATE))) {
+    return
+  }
+  const pair = {
+    show_hide: field === 'hotkey_toggle_window' ? value : hotkeyToggle.value,
+    translate_selection: field === 'hotkey_quick_translate' ? value : hotkeyQuick.value,
+  }
+  hotkeySaving.value = field
+  try {
+    const result = await applyHotkeys(pair)
+    if (result.registered) {
+      hotkeyConflict.value = null
+      await settings.saveApp({ [field]: value })
+    } else {
+      // Do not PUT: the setting stays at its previous value, which the
+      // recorder displays again automatically once recording ends.
+      hotkeyConflict.value = result.conflict ?? value
+    }
+  } catch {
+    hotkeyConflict.value = value
+  } finally {
+    hotkeySaving.value = null
+  }
+}
 
 const themeOptions: { value: ThemeMode; label: string }[] = [
   { value: 'system', label: 'settings.general.themeSystem' },
@@ -80,13 +126,38 @@ function setAutoStart(checked: boolean): void {
       </label>
     </SettingRow>
 
-    <SettingRow :label="t('settings.general.hotkeyToggle')">
-      <kbd class="hotkey">{{ settings.app?.hotkey_toggle_window ?? 'Ctrl+Alt+Space' }}</kbd>
+    <SettingRow
+      :label="t('settings.general.hotkeyToggle')"
+      :hint="t('settings.general.hotkeyRecordHint')"
+    >
+      <HotkeyInput
+        :model-value="hotkeyToggle"
+        :label="t('settings.general.hotkeyToggle')"
+        data-testid="hotkey-toggle"
+        @update:model-value="(value: string) => onHotkeyCommit('hotkey_toggle_window', value)"
+      />
     </SettingRow>
 
-    <SettingRow :label="t('settings.general.hotkeyQuick')" :hint="t('settings.general.hotkeysHint')">
-      <kbd class="hotkey">{{ settings.app?.hotkey_quick_translate ?? 'Ctrl+Alt+Q' }}</kbd>
+    <SettingRow
+      :label="t('settings.general.hotkeyQuick')"
+      :hint="t('settings.general.hotkeyRecordHint')"
+    >
+      <HotkeyInput
+        :model-value="hotkeyQuick"
+        :label="t('settings.general.hotkeyQuick')"
+        data-testid="hotkey-quick"
+        @update:model-value="(value: string) => onHotkeyCommit('hotkey_quick_translate', value)"
+      />
     </SettingRow>
+
+    <p
+      v-if="hotkeyConflict"
+      class="hotkey-conflict"
+      role="alert"
+      data-testid="hotkey-conflict"
+    >
+      {{ t('settings.general.hotkeyConflict', { conflict: hotkeyConflict }) }}
+    </p>
   </div>
 </template>
 
@@ -173,12 +244,8 @@ function setAutoStart(checked: boolean): void {
   outline-offset: 2px;
 }
 
-.hotkey {
-  font-family: var(--font-mono);
+.hotkey-conflict {
   font-size: 12px;
-  padding: 3px 8px;
-  border-radius: 6px;
-  background: var(--bg-inset);
-  border: 1px solid var(--hairline);
+  color: var(--danger);
 }
 </style>

@@ -37,6 +37,8 @@ export default {
   tabs: {
     newTab: 'New tab',
     openNew: 'New tab',
+    openNewShortcut: 'New tab (Ctrl+T)',
+    keysHint: 'Shortcuts: Ctrl+T new tab · Ctrl+W close current tab',
     close: 'Close tab',
     kindWord: 'W',
     kindText: 'T',
@@ -78,6 +80,7 @@ export default {
     inVocabulary: 'Saved',
     speakUk: 'British pronunciation',
     speakUs: 'American pronunciation',
+    ttsUnavailable: 'Speech is not available on this device',
     inflections: 'Inflections',
     synonyms: 'Synonyms',
     pos: {
@@ -96,6 +99,9 @@ export default {
 
   text: {
     clickHint: 'Tip: click an English word in the source to look it up',
+    copyAll: 'Copy translation',
+    copySegment: 'Copy segment translation',
+    copied: 'Copied',
   },
 
   vocab: {
@@ -150,7 +156,11 @@ export default {
       hotkeys: 'Hotkeys',
       hotkeyToggle: 'Show / hide main window',
       hotkeyQuick: 'Quick translate selected text',
-      hotkeysHint: 'Custom hotkeys arrive in a later release.',
+      hotkeyRecordHint: 'Click, then press the new combo. Esc cancels, Backspace clears',
+      hotkeyRecording: 'Press a key combination…',
+      hotkeyEmpty: 'Not set',
+      hotkeyNeedModifier: 'The combo needs at least one modifier (Ctrl/Alt/Shift/Win)',
+      hotkeyConflict: 'Hotkey conflict: {conflict} is already in use by another program',
     },
     provider: {
       mode: 'Mode',

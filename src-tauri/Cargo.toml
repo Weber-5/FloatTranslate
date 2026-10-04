@@ -16,11 +16,22 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-ico"] }
 tauri-plugin-single-instance = "2"
+tauri-plugin-global-shortcut = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "6"
 rand = "0.9"
 thiserror = "2"
+
+# Windows-only selection capture (docs/07 §5): clipboard save/restore plus
+# SendInput for the simulated Ctrl+C.
+[target.'cfg(windows)'.dependencies]
+clipboard-win = "5"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [dev-dependencies]
 tempfile = "3"

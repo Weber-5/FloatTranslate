@@ -1,10 +1,11 @@
-//! Tauri IPC commands exposed to the WebView (Phase 1: backend wiring only).
+//! Tauri IPC commands exposed to the WebView (backend wiring + hotkeys).
 
 use std::fmt;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::State;
 
+use crate::hotkey::ApplyHotkeysResult;
 use crate::sidecar::BackendStatus;
 use crate::AppState;
 
@@ -72,6 +73,34 @@ pub fn get_backend_config(state: State<'_, AppState>) -> Result<BackendConfig, C
     })
 }
 
+/// Request body of `apply_hotkeys` (frozen contract): both bindings in the
+/// frozen `"Ctrl+Alt+Space"` string format.
+#[derive(Debug, Clone, Deserialize)]
+pub struct HotkeyInput {
+    #[serde(alias = "showHide")]
+    pub show_hide: String,
+    #[serde(alias = "translateSelection")]
+    pub translate_selection: String,
+}
+
+/// Applies a new pair of global hotkey bindings.
+///
+/// Frozen contract: the frontend invokes this at boot and after settings
+/// edits; Rust is the registration authority and never reads Go settings.
+/// Registration follows register-first/rollback-on-failure semantics, so the
+/// previous bindings keep working whenever the new ones cannot be registered
+/// (the offending string is returned as `conflict`). Until the first call no
+/// hotkeys are registered at all.
+#[tauri::command]
+pub fn apply_hotkeys(
+    hotkeys: HotkeyInput,
+    state: State<'_, AppState>,
+) -> Result<ApplyHotkeysResult, String> {
+    Ok(state
+        .hotkeys
+        .apply(&hotkeys.show_hide, &hotkeys.translate_selection))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,5 +116,25 @@ mod tests {
     fn command_error_display_matches_inner() {
         let err = CommandError::new("backend not ready: starting");
         assert_eq!(err.to_string(), "backend not ready: starting");
+    }
+
+    #[test]
+    fn hotkey_input_accepts_frozen_field_names() {
+        let input: HotkeyInput = serde_json::from_str(
+            r#"{"show_hide":"Ctrl+Alt+Space","translate_selection":"Ctrl+Alt+Q"}"#,
+        )
+        .unwrap();
+        assert_eq!(input.show_hide, "Ctrl+Alt+Space");
+        assert_eq!(input.translate_selection, "Ctrl+Alt+Q");
+    }
+
+    #[test]
+    fn hotkey_input_tolerates_camel_case_aliases() {
+        let input: HotkeyInput = serde_json::from_str(
+            r#"{"showHide":"Ctrl+Alt+Space","translateSelection":"Ctrl+Alt+Q"}"#,
+        )
+        .unwrap();
+        assert_eq!(input.show_hide, "Ctrl+Alt+Space");
+        assert_eq!(input.translate_selection, "Ctrl+Alt+Q");
     }
 }

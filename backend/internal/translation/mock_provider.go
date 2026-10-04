@@ -123,13 +123,13 @@ func mockWord(input string) (string, error) {
 	return string(raw), nil
 }
 
-// mockText builds a TextTranslation payload for input.
+// mockText builds a schema-valid per-chunk text payload for input
+// (Phase 3 contract: {"translated_markdown", "segments"} — the pipeline
+// assembles source_markdown from the original input itself).
 func mockText(input string) (string, error) {
-	src := input
-	payload := dto.TextTranslation{
-		SourceMarkdown:     src,
-		TranslatedMarkdown: "（mock 译文）\n\n" + src,
-		Segments:           []dto.Segment{{Source: src, Translation: "（mock 译文）" + src}},
+	payload := map[string]any{
+		"translated_markdown": "（mock 译文）\n\n" + input,
+		"segments":            []dto.Segment{{Source: input, Translation: "（mock 译文）" + input}},
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {

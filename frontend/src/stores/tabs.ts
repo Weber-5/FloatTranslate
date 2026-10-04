@@ -31,9 +31,11 @@ function createTabId(): string {
   return `tab-${Date.now().toString(36)}-${tabCounter}`
 }
 
-function textSnippet(text: string, max = 24): string {
+/** Text tab titles use the first ~12 chars of the input (docs/03 §6 style). */
+function textSnippet(text: string, max = 12): string {
   const singleLine = text.replace(/\s+/g, ' ').trim()
-  return singleLine.length > max ? `${singleLine.slice(0, max)}…` : singleLine
+  if (singleLine.length <= max) return singleLine
+  return `${singleLine.slice(0, max).trimEnd()}…`
 }
 
 function isEmptyPayload(payload: TabPayload): boolean {

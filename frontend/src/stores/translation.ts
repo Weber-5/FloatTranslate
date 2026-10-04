@@ -136,6 +136,23 @@ export const useTranslationStore = defineStore('translation', () => {
   }
 
   /**
+   * US-04 划词即译: the host captured the selected text and woke the window.
+   * Opens a NEW text tab carrying the captured text as input and auto-sends
+   * the translation (translate() flips the state machine to `translating`
+   * synchronously before the first await).
+   */
+  function openSelectionTab(text: string): string {
+    const tabsStore = useTabsStore()
+    const tab = tabsStore.openTextTab(text)
+    const state = ensureState(tab.id)
+    state.input = text
+    state.status = 'input_ready'
+    state.error = null
+    void translate(tab.id)
+    return tab.id
+  }
+
+  /**
    * History drawer: reopen as a new tab. The result is loaded from the stored
    * record via GET /translations/{id} — a plain DB read, never a provider
    * call. Falls back to the history payload if the record is gone.
@@ -213,6 +230,7 @@ export const useTranslationStore = defineStore('translation', () => {
     retranslate,
     openWordLookup,
     openSavedWord,
+    openSelectionTab,
     openHistoryItem,
     hydrateFromResponse,
     restoreTabsWithHydration,

@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import AppShell from '@/components/layout/AppShell.vue'
 import BackendStatusGate from '@/components/common/BackendStatusGate.vue'
 import { useTheme } from '@/composables/useTheme'
 import { useBackendStore } from '@/stores/backend'
+import { registerHotkeysFromSettings } from '@/services/hotkeys'
+import { listenSelectionCaptured } from '@/services/selection'
 
 const route = useRoute()
 useTheme()
@@ -15,6 +17,25 @@ const backend = useBackendStore()
 const gateUp = computed(() => backend.isRealMode && !backend.ready)
 const showBare = computed(() => route.meta.bare === true && !gateUp.value)
 const showShell = computed(() => !gateUp.value && route.meta.bare !== true)
+
+// US-04: the host emits `selection-captured` after waking the window; the
+// handler opens a new tab and auto-sends the translation.
+onMounted(() => {
+  void listenSelectionCaptured()
+})
+
+// Frozen boot sequence: once health is ready (probe or host event), register
+// the stored hotkeys from the loaded settings — exactly once per launch.
+const hotkeysApplied = ref(false)
+watch(
+  () => backend.isRealMode && backend.ready,
+  (shouldApply) => {
+    if (!shouldApply || hotkeysApplied.value) return
+    hotkeysApplied.value = true
+    void registerHotkeysFromSettings().catch(() => undefined)
+  },
+  { immediate: true },
+)
 </script>
 
 <template>

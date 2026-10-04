@@ -28,10 +28,19 @@ const wordRules = `词条输出要求：
 - 不生成例句。`
 
 // textRules encodes the text structured output requirements (docs/06 §5).
+// Since Phase 3 text requests carry one chunk at a time, so the model never
+// returns source_markdown (the pipeline assembles it from the original input).
 const textRules = `文本翻译要求：
 - 保留 Markdown 结构（标题、列表、表格、链接、代码块等）；
-- source_markdown 为原文，translated_markdown 为完整译文；
+- translated_markdown 为本次输入的完整译文；
 - segments[] 与原文段落一一对应，source 为段落原文，translation 为对应译文。`
+
+// chunkInstructions is appended to the system prompt for every per-chunk
+// provider call (Phase 3 long text chunking, docs/06 §8).
+const chunkInstructions = `本次请求只处理长文本的一个连续分块：
+- 只翻译该分块内容，translated_markdown 为该分块的完整译文；
+- segments[] 的 source 为分块内的原文片段，translation 为其对应译文；
+- 不要输出 source_markdown 字段。`
 
 // buildSystemPrompt composes the system prompt for one translation request:
 // frozen base rules + terminology hard constraint (pre-check: the list is
@@ -61,6 +70,12 @@ func buildSystemPrompt(kind string, terms []repository.TerminologyRow, customPro
 		sb.WriteString(trimmed)
 	}
 	return sb.String()
+}
+
+// buildChunkSystemPrompt appends the per-chunk output instructions to the
+// request's system prompt for every chunked provider call.
+func buildChunkSystemPrompt(systemPrompt string) string {
+	return systemPrompt + "\n\n" + chunkInstructions
 }
 
 // buildUserPrompt composes the user prompt for one translation request from
