@@ -1,0 +1,180 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Stage 1 (docs/10 §2): OpenAPI + JSON Schema lint + version consistency.
+  contract:
+    name: Contract (openapi / schemas / versions)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: OpenAPI + JSON Schema lint
+        run: node scripts/check-contract.mjs
+      - name: Version consistency (tauri.conf vs constants vs openapi)
+        run: node scripts/check-versions.mjs
+
+  frontend:
+    name: Frontend (lint / test / build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install
+        working-directory: frontend
+        run: npm ci
+      - name: Lint
+        working-directory: frontend
+        run: npm run lint
+      - name: Test
+        working-directory: frontend
+        run: npm test
+      - name: Build
+        working-directory: frontend
+        run: npm run build
+
+  backend:
+    name: Backend (fmt / vet / test / build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - name: gofmt check
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt needed on:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test -count=1 ./...
+      - name: Build
+        run: go build ./...
+
+  rust:
+    name: Rust host (fmt / clippy / test / build)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      # tauri's generate_context! embeds frontendDist at compile time, so the
+      # frontend must be built before any cargo command.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Build frontend assets
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: fmt
+        working-directory: src-tauri
+        run: cargo fmt --check
+      - name: clippy
+        working-directory: src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+      - name: test
+        working-directory: src-tauri
+        run: cargo test
+      - name: build
+        working-directory: src-tauri
+        run: cargo build
+
+  # Stage 5: sidecar health + API smoke (backend exe + /health round trip).
+  # GUI launch is intentionally not exercised here (flaky on CI runners).
+  integration:
+    name: Integration (backend health smoke)
+    needs: [frontend, backend, rust]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - name: Build backend exe
+        working-directory: backend
+        env:
+          CGO_ENABLED: 0
+        run: go build -trimpath -ldflags "-s -w" -o bin/floattranslate-backend.exe ./cmd/server
+      - name: Backend exe exists
+        shell: pwsh
+        run: |
+          $exe = 'backend/bin/floattranslate-backend.exe'
+          if (-not (Test-Path $exe)) { throw "missing backend exe: $exe" }
+          Write-Host "backend exe: $((Get-Item $exe).Length) bytes"
+      - name: Smoke test /health
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dataRoot = Join-Path $env:RUNNER_TEMP 'ft-data'
+          New-Item -ItemType Directory -Force -Path $dataRoot | Out-Null
+          $exe = (Resolve-Path 'backend/bin/floattranslate-backend.exe').Path
+
+          $psi = New-Object System.Diagnostics.ProcessStartInfo
+          $psi.FileName = $exe
+          $psi.UseShellExecute = $false
+          $psi.RedirectStandardOutput = $true
+          $psi.RedirectStandardError = $true
+          $psi.EnvironmentVariables['FT_SESSION_TOKEN'] = 'ci-smoke-token'
+          $psi.EnvironmentVariables['FT_HTTP_PORT'] = '0'
+          $psi.EnvironmentVariables['FT_DATA_ROOT'] = $dataRoot
+          $p = [System.Diagnostics.Process]::Start($psi)
+          try {
+            $ready = $p.StandardOutput.ReadLine()
+            Write-Host "READY line: $ready"
+            if ($ready -notmatch '"port":(\d+)') {
+              throw "backend did not emit a READY line with a port (got: '$ready')"
+            }
+            $port = $Matches[1]
+
+            $deadline = (Get-Date).AddSeconds(20)
+            $res = $null
+            while ($true) {
+              try {
+                $res = Invoke-WebRequest -Uri "http://127.0.0.1:$port/health" `
+                  -UseBasicParsing -TimeoutSec 5
+                break
+              } catch {
+                if ($p.HasExited) { throw "backend exited early with code $($p.ExitCode)" }
+                if ((Get-Date) -gt $deadline) { throw "/health not reachable within 20s" }
+                Start-Sleep -Milliseconds 300
+              }
+            }
+            if ($res.StatusCode -ne 200) { throw "health status = $($res.StatusCode), want 200" }
+            Write-Host "health body: $($res.Content)"
+          } finally {
+            if ($p -and -not $p.HasExited) { $p.Kill() }
+            if ($p) { $p.Dispose() }
+          }

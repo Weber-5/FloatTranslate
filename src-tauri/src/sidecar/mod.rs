@@ -107,7 +107,10 @@ pub enum SidecarError {
 /// 1. `FT_BACKEND_EXE` environment variable (if it points at an existing file),
 /// 2. `<repo>/backend/bin/floattranslate-backend.exe` (repo root is derived
 ///    from the standard dev layout `<repo>/src-tauri/target/<profile>/`),
-/// 3. `<exe_dir>/floattranslate-backend.exe` (installed/portable layout).
+/// 3. `<exe_dir>/resources/floattranslate-backend.exe` (NSIS install layout:
+///    the release bundle config `scripts/tauri-release.config.json` ships the
+///    backend under `<install>/resources`),
+/// 4. `<exe_dir>/floattranslate-backend.exe` (portable/custom layout).
 ///
 /// Every candidate that was tried is listed in the error for diagnostics.
 pub fn resolve_backend_exe(
@@ -125,6 +128,9 @@ pub fn resolve_backend_exe(
     for repo_root in repo_roots_from_exe_dir(exe_dir) {
         candidates.push(repo_root.join("backend").join("bin").join(BACKEND_EXE_NAME));
     }
+    // NSIS install layout: the release bundle config copies the backend into
+    // `<install>/resources/` (docs/10 packaging).
+    candidates.push(exe_dir.join("resources").join(BACKEND_EXE_NAME));
     candidates.push(exe_dir.join(BACKEND_EXE_NAME));
 
     if let Some(found) = candidates.iter().find(|p| p.is_file()) {
@@ -671,6 +677,20 @@ mod tests {
 
         let resolved = resolve_backend_exe(&exe_dir, None).unwrap();
         assert_eq!(resolved, repo_backend.join(BACKEND_EXE_NAME));
+    }
+
+    #[test]
+    fn resolve_prefers_resources_candidate_before_exe_dir() {
+        let guard = tempfile::tempdir().unwrap();
+        let exe_dir = guard.path().join("install");
+        std::fs::create_dir_all(exe_dir.join("resources")).unwrap();
+        std::fs::write(exe_dir.join("resources").join(BACKEND_EXE_NAME), b"stub").unwrap();
+        // exe_dir candidate also exists but must lose to the resources
+        // candidate (bundled layout).
+        std::fs::write(exe_dir.join(BACKEND_EXE_NAME), b"stub").unwrap();
+
+        let resolved = resolve_backend_exe(&exe_dir, None).unwrap();
+        assert_eq!(resolved, exe_dir.join("resources").join(BACKEND_EXE_NAME));
     }
 
     #[test]

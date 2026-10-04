@@ -1,0 +1,150 @@
+# Release pipeline (docs/10 §3–§4). Triggered by pushing a `v*` tag (v1.0.0).
+# Produces a DRAFT release; publishing is a human decision.
+#
+# Assets (docs/10 §3):
+#   - FloatTranslate_<ver>_x64-setup.exe     (NSIS, current-user install)
+#   - FloatTranslate_<ver>_x64-portable.exe  (bare release exe, renamed)
+#   - checksums.txt                          (SHA256, generated AFTER signing)
+#   - release-notes.md                       (from .github/release-notes-template.md)
+#
+# Code signing (docs/10 §4): conditional on the WINDOWS_CERTIFICATE_BASE64 /
+# WINDOWS_CERTIFICATE_PASSWORD secrets; without them an unsigned build is
+# produced. Secrets never enter the repo — the certificate is decoded into a
+# temp .pfx at build time only and deleted in a finally block.
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: Build & draft release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Verify tag matches app version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $expected = "v$version"
+          if ($env:GITHUB_REF_NAME -ne $expected) {
+            throw "tag '$($env:GITHUB_REF_NAME)' != expected '$expected' (src-tauri/tauri.conf.json is the version source of truth)"
+          }
+          Write-Host "tag OK: $expected"
+
+      - name: Build Go backend
+        working-directory: backend
+        env:
+          CGO_ENABLED: 0
+        run: go build -trimpath -ldflags "-s -w" -o bin/floattranslate-backend.exe ./cmd/server
+
+      - name: Stage sidecar resource (bundle.resources)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path src-tauri/resources | Out-Null
+          Copy-Item backend/bin/floattranslate-backend.exe src-tauri/resources/floattranslate-backend.exe -Force
+          Get-Item src-tauri/resources/floattranslate-backend.exe |
+            ForEach-Object { Write-Host "staged $($_.Name) ($($_.Length) bytes)" }
+
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build NSIS installer + release exe
+        # scripts/tauri-release.config.json patches bundle.resources in so the
+        # staged sidecar exe lands in <install>/resources/; plain tauri.conf.json
+        # stays without it because tauri-build validates resource globs on every
+        # cargo invocation.
+        run: npx @tauri-apps/cli@2 build --bundles nsis --config scripts/tauri-release.config.json
+
+      - name: Package dist (rename portable + installer)
+        shell: pwsh
+        run: scripts/package-release.ps1
+
+      - name: Sign artifacts (skipped when signing secrets absent)
+        env:
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_BASE64)) {
+            Write-Host 'WINDOWS_CERTIFICATE_BASE64 not configured; producing unsigned build.'
+            exit 0
+          }
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)) {
+            throw 'WINDOWS_CERTIFICATE_BASE64 is set but WINDOWS_CERTIFICATE_PASSWORD is missing.'
+          }
+          $ErrorActionPreference = 'Stop'
+          # Decode the base64 secret into a temp .pfx (build time only).
+          $pfx = Join-Path $env:RUNNER_TEMP 'floattranslate-signing.pfx'
+          [IO.File]::WriteAllBytes(
+            $pfx,
+            [Convert]::FromBase64String(($env:WINDOWS_CERTIFICATE_BASE64 -replace '\s', ''))
+          )
+          try {
+            $signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' `
+              -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
+              Where-Object { $_.Directory.Name -eq 'x64' } |
+              Sort-Object FullName -Descending | Select-Object -First 1
+            if (-not $signtool) { throw 'signtool.exe not found under Windows Kits' }
+            Write-Host "signtool: $($signtool.FullName)"
+            foreach ($exe in (Get-ChildItem dist -Filter '*.exe')) {
+              & $signtool.FullName sign `
+                /fd SHA256 /tr https://timestamp.digicert.com /td SHA256 `
+                /f $pfx /p $env:WINDOWS_CERTIFICATE_PASSWORD $exe.FullName
+              if ($LASTEXITCODE -ne 0) { throw "signtool failed for $($exe.Name)" }
+              Write-Host "signed: $($exe.Name)"
+            }
+          } finally {
+            Remove-Item $pfx -Force -ErrorAction SilentlyContinue
+          }
+
+      # Checksums must run after signing: signing rewrites the exe bytes.
+      - name: Generate checksums
+        shell: pwsh
+        run: scripts/package-release.ps1 -ChecksumsOnly
+
+      - name: Generate release notes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $notes = Get-Content .github/release-notes-template.md -Raw
+          $notes = $notes.Replace('${VERSION}', $version).Replace('${TAG_NAME}', $env:GITHUB_REF_NAME)
+          Set-Content -Path dist/release-notes.md -Value $notes -Encoding utf8
+          Write-Host "release notes written for $env:GITHUB_REF_NAME"
+
+      - name: Create draft GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          body_path: dist/release-notes.md
+          files: |
+            dist/*
