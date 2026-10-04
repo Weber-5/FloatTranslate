@@ -537,6 +537,8 @@ components:
           oneOf:
             - $ref: "#/components/schemas/WordTranslation"
             - $ref: "#/components/schemas/TextTranslation"
+        source: { type: string, enum: [model, cache] }
+        model: { type: string }
         created_at: { type: string, format: date-time }
     VocabularyItem:
       type: object
