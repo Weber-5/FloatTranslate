@@ -7,7 +7,7 @@
  */
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
-import { isMockMode, probeBackend, type BackendConfig } from '@/api'
+import { isMockMode, probeBackend, reconnectBackend, type BackendConfig } from '@/api'
 
 export type BackendHealthStatus = 'starting' | 'ready' | 'restarting' | 'failed'
 
@@ -78,6 +78,16 @@ export const useBackendStore = defineStore('backend', () => {
   /** Gate retry button: shows the restarting notice while probing. */
   async function retry(config?: BackendConfig): Promise<boolean> {
     markRestarting()
+    if (!isMockMode()) {
+      // The sidecar may have come back on a NEW ephemeral port; refresh the
+      // cached base URL first. A rejected reconnect keeps the probe on the
+      // old config, which then fails and keeps the gate honest.
+      try {
+        await reconnectBackend()
+      } catch {
+        // fall through to the probe (it will report `failed`)
+      }
+    }
     return probe(config)
   }
 
@@ -89,8 +99,21 @@ export const useBackendStore = defineStore('backend', () => {
     }
     if (eventName === 'backend-status') {
       const next = normalizeHostStatus(payload)
-      if (next === 'ready') markReady()
-      else if (next === 'failed') markFailed()
+      if (next === 'ready') {
+        markReady()
+        // Restarted sidecars bind a NEW ephemeral port: refresh the client
+        // config, then confirm with a real /health probe.
+        void (async () => {
+          if (!isMockMode()) {
+            try {
+              await reconnectBackend()
+            } catch {
+              return // still not READY; the next host event or probe heals it
+            }
+          }
+          await probe()
+        })()
+      } else if (next === 'failed') markFailed()
       else if (next === 'restarting') markRestarting()
       else if (next === 'starting') markStarting()
     }

@@ -91,6 +91,9 @@ const busyLabel = computed(() => (testing.value ? t('onboarding.testing') : t('o
 
 <template>
   <div class="onboarding">
+    <!-- Frameless window: this top strip is the only drag handle on the
+         onboarding screen — without it the window cannot be moved at all. -->
+    <div class="onboarding-drag-strip" data-tauri-drag-region aria-hidden="true" />
     <div class="wizard card">
       <h1 class="wizard-title">{{ t('onboarding.title') }}</h1>
       <p class="wizard-desc">{{ t('onboarding.desc') }}</p>
@@ -169,12 +172,24 @@ const busyLabel = computed(() => (testing.value ? t('onboarding.testing') : t('o
 
 <style scoped>
 .onboarding {
+  position: relative;
   height: 100%;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
   padding: var(--space-5);
   background: var(--bg-app);
+}
+
+.onboarding-drag-strip {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 28px;
+  /* Same stacking context as the centered card; keeps the strip grabbable. */
+  z-index: 10;
 }
 
 .wizard {

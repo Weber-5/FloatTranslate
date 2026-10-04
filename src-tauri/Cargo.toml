@@ -10,6 +10,13 @@ publish = false
 name = "floattranslate_lib"
 path = "src/lib.rs"
 
+[features]
+# Production builds embed frontend/dist and serve it via the tauri:// protocol;
+# without this feature even release binaries load `build.devUrl` (Tauri v2
+# dev/prod switch). `tauri build` enables it automatically; plain
+# `cargo build --release` must pass `--features custom-protocol`.
+custom-protocol = ["tauri/custom-protocol"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

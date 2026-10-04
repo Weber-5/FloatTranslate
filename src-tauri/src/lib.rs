@@ -114,7 +114,9 @@ pub fn run() {
             commands::get_autostart,
             commands::set_always_on_top,
             commands::reset_window_state,
-            commands::open_logs_dir
+            commands::open_logs_dir,
+            commands::minimize_window,
+            commands::hide_to_tray
         ]);
 
     let app = match builder.build(tauri::generate_context!()) {

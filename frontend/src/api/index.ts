@@ -26,11 +26,20 @@ let resolvedClient: ApiClient | null = null
 let resolvedConfig: BackendConfig | null = null
 let resolvedIsMock = true
 
+const CONFIG_RETRY_FIRST_MS = 250
+const CONFIG_RETRY_MAX_MS = 2000
+
 export function isTauri(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 }
 
+/**
+ * Mock/real decision. Before `initApi()` finishes (the real path retries
+ * `get_backend_config` until the sidecar is READY), fall back to the
+ * synchronous Tauri detection so the backend gate can render immediately.
+ */
 export function isMockMode(): boolean {
+  if (clientPromise === null || resolvedClient === null) return !isTauri()
   return resolvedIsMock
 }
 
@@ -39,15 +48,36 @@ export function getBackendConfig(): BackendConfig | null {
   return resolvedConfig
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function resolveRealClientWithRetry(): Promise<ApiClient> {
+  const { invoke } = await import('@tauri-apps/api/core')
+  let delay = CONFIG_RETRY_FIRST_MS
+  for (;;) {
+    try {
+      const config = await invoke<BackendConfig>('get_backend_config')
+      // `reconnectBackend()` may have won the race while we were waiting.
+      if (resolvedClient) return resolvedClient
+      resolvedIsMock = false
+      resolvedConfig = config
+      const client = createRealClient(config)
+      resolvedClient = client
+      return client
+    } catch {
+      // Sidecar not READY yet (docs/01 §3 `starting`): keep the gate up and
+      // poll. The host restarts the sidecar with backoff; never give up so a
+      // slow first boot can never brick the app into a blank screen.
+      await sleep(delay)
+      delay = Math.min(delay * 2, CONFIG_RETRY_MAX_MS)
+    }
+  }
+}
+
 function resolveClient(): Promise<ApiClient> {
   if (isTauri()) {
-    return import('@tauri-apps/api/core')
-      .then(({ invoke }) => invoke<BackendConfig>('get_backend_config'))
-      .then((config) => {
-        resolvedIsMock = false
-        resolvedConfig = config
-        return createRealClient(config)
-      })
+    return resolveRealClientWithRetry()
   }
   return import('./mock').then(({ createMockClient }) => {
     resolvedIsMock = true
@@ -98,4 +128,23 @@ export async function probeBackend(config?: BackendConfig): Promise<boolean> {
   const target = config ?? resolvedConfig
   if (!target) return false
   return probeBackendHealth(target.base_url)
+}
+
+/**
+ * Re-resolves `get_backend_config` and rebuilds the real client.
+ *
+ * Used when the host reports the sidecar became READY again: restarts bind a
+ * NEW ephemeral port, so the cached base URL must be refreshed before the
+ * next probe (docs/02 §6: runtime connection state is re-established).
+ * No-op in mock mode; rejects while the sidecar is still not READY.
+ */
+export async function reconnectBackend(): Promise<void> {
+  if (!isTauri()) return
+  const { invoke } = await import('@tauri-apps/api/core')
+  const config = await invoke<BackendConfig>('get_backend_config')
+  resolvedIsMock = false
+  resolvedConfig = config
+  const client = createRealClient(config)
+  resolvedClient = client
+  clientPromise = Promise.resolve(client)
 }

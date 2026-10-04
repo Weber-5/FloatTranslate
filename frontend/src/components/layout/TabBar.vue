@@ -46,6 +46,7 @@ function onTabAuxClick(id: string, event: MouseEvent): void {
     :aria-label="t('tabs.openNew')"
     :title="t('tabs.keysHint')"
     data-testid="tab-bar"
+    data-tauri-drag-region
   >
     <div
       v-for="(tab, index) in tabsStore.tabs"

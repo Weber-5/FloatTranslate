@@ -179,6 +179,15 @@ pub fn build_backend_command(exe: &Path, token: &str, data_root: &Path) -> Comma
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    // The Go sidecar is a console-subsystem binary; without CREATE_NO_WINDOW
+    // a release build (GUI subsystem, no parent console) makes Windows
+    // allocate a VISIBLE console for it next to the app window.
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        use std::os::windows::process::CommandExt as _;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
     command
 }
 

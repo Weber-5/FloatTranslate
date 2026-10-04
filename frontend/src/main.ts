@@ -10,33 +10,36 @@ import './styles/tokens.css'
 import './styles/base.css'
 
 async function bootstrap(): Promise<void> {
-  // Resolve mock vs real client before any store touches the API.
-  await initApi()
-
   const pinia = createPinia()
   const app = createApp(App)
   app.use(pinia)
 
-  // Real mode: consume host health events; the boot probe starts after mount
-  // so the full-screen "starting" gate is visible while the sidecar boots.
   const backend = useBackendStore(pinia)
-  if (backend.isRealMode) {
-    void backend.listenHostEvents()
-  }
-
   app.use(i18n)
   app.use(router)
-  try {
-    await router.isReady()
-  } catch {
-    // Real mode with the sidecar still down: the initial navigation is
-    // aborted by the backend gate and replayed once /health succeeds.
-  }
+  // Mount FIRST: in real mode the full-screen gate renders while the sidecar
+  // boots (the webview usually wins the race against sidecar READY, so any
+  // await before mount would leave a blank window). The router guard blocks
+  // navigation (and API calls) until /health answers.
   app.mount('#app')
 
   if (backend.isRealMode) {
+    void backend.listenHostEvents()
+    void bootstrapReal(backend)
+  } else {
     void backend.initialProbe()
   }
+}
+
+/** Real mode: resolve the client (retries until READY), then run the probe. */
+async function bootstrapReal(backend: ReturnType<typeof useBackendStore>): Promise<void> {
+  try {
+    await initApi()
+  } catch {
+    // The real client retries internally and never rejects; kept defensive.
+    return
+  }
+  await backend.initialProbe()
 }
 
 void bootstrap()

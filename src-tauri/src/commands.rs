@@ -361,6 +361,29 @@ pub async fn pick_open_path(
 
 // --- Phase 5: OS integration (autostart / window / logs) --------------------
 
+/// Minimizes the main window (titlebar minimize button).
+#[tauri::command]
+pub fn minimize_window(app: AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window is missing from the runtime".to_string())?;
+    window
+        .minimize()
+        .map_err(|err| format!("failed to minimize window: {err}"))
+}
+
+/// Hides the main window to the tray (titlebar close button, docs/00 §2:
+/// clicking close never quits the app; quit lives in the tray menu).
+#[tauri::command]
+pub fn hide_to_tray(app: AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window is missing from the runtime".to_string())?;
+    window
+        .hide()
+        .map_err(|err| format!("failed to hide window: {err}"))
+}
+
 /// Name of the log directory below the data root (frozen contract).
 pub const LOGS_DIR_NAME: &str = "logs";
 
