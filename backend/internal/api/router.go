@@ -6,6 +6,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/Weber-5/FloatTranslate/backend/internal/chat"
 	"github.com/Weber-5/FloatTranslate/backend/internal/config"
 	"github.com/Weber-5/FloatTranslate/backend/internal/llm"
 	"github.com/Weber-5/FloatTranslate/backend/internal/repository"
@@ -23,6 +24,8 @@ type Server struct {
 	tabs             *repository.TabsRepo
 	vocabulary       *repository.VocabularyRepo
 	terms            *terminology.Service
+	chats            *repository.ChatsRepo
+	chatSvc          *chat.Service
 	resolver         llm.Resolver
 	providerSettings *ProviderSettingsStore
 	ping             func() error
@@ -30,13 +33,14 @@ type Server struct {
 
 // NewServer builds the API server. providerSettings holds the provider
 // configuration + in-memory API key; it MUST be the same instance the
-// pipeline was built with so a saved key is visible to the translation
-// flow. resolver supplies the provider per request (the providerSettings
-// store in production wiring; the mock only as a test fixture). ping
-// reports database health for /health.
+// pipeline and the chat service were built with so a saved key is visible
+// to both flows. resolver supplies the provider per request (the
+// providerSettings store in production wiring; the mock only as a test
+// fixture). ping reports database health for /health.
 func NewServer(cfg config.Config, logger *slog.Logger, pipeline *translation.Pipeline,
 	settings *repository.SettingsRepo, history *repository.HistoryRepo, tabs *repository.TabsRepo,
 	vocabulary *repository.VocabularyRepo, terms *terminology.Service,
+	chats *repository.ChatsRepo, chatSvc *chat.Service,
 	providerSettings *ProviderSettingsStore, resolver llm.Resolver, ping func() error) *Server {
 	return &Server{
 		cfg:              cfg,
@@ -47,6 +51,8 @@ func NewServer(cfg config.Config, logger *slog.Logger, pipeline *translation.Pip
 		tabs:             tabs,
 		vocabulary:       vocabulary,
 		terms:            terms,
+		chats:            chats,
+		chatSvc:          chatSvc,
 		resolver:         resolver,
 		providerSettings: providerSettings,
 		ping:             ping,
@@ -94,6 +100,26 @@ func (s *Server) Handler() http.Handler {
 
 		r.Get("/tabs", s.GetTabs)
 		r.Put("/tabs", s.PutTabs)
+
+		// --- Phase 4: AI sidebar (chats, SSE generations, contexts) ---
+		r.Get("/chats", s.ListChats)
+		r.Post("/chats", s.CreateChat)
+		r.Patch("/chats/{id}", s.UpdateChat)
+		r.Delete("/chats/{id}", s.DeleteChat)
+
+		r.Get("/chats/{id}/messages", s.ListChatMessages)
+		r.Delete("/chats/{id}/messages", s.ClearChatMessages)
+
+		r.Get("/chats/{id}/context", s.GetConversationContext)
+		r.Put("/chats/{id}/context", s.PutConversationContext)
+
+		r.Post("/chats/{id}/compact", s.CompactChat)
+		r.Post("/chats/{id}/generations", s.CreateGeneration)
+		r.Post("/chats/{id}/regenerate", s.RegenerateChat)
+		r.Post("/chats/{id}/generations/{generationId}/cancel", s.CancelGeneration)
+
+		r.Get("/context/global", s.GetGlobalContext)
+		r.Put("/context/global", s.PutGlobalContext)
 	})
 
 	return r

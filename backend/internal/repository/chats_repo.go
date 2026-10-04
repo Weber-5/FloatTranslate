@@ -122,3 +122,81 @@ func (r *ChatsRepo) CountMessages(ctx context.Context, chatID string) (int, erro
 	}
 	return n, nil
 }
+
+// ListChats returns every chat ordered by updated_at DESC (newest activity
+// first, docs/04 §10). The id DESC tiebreak keeps the order stable when two
+// chats share the same RFC3339 second.
+func (r *ChatsRepo) ListChats(ctx context.Context) ([]ChatRow, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT id, title, conversation_context, compact_summary, created_at, updated_at
+		 FROM chats ORDER BY updated_at DESC, id DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("chats list: %w", err)
+	}
+	defer rows.Close()
+	var out []ChatRow
+	for rows.Next() {
+		var row ChatRow
+		if err := rows.Scan(&row.ID, &row.Title, &row.ConversationContext, &row.CompactSummary,
+			&row.CreatedAt, &row.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("chats list scan: %w", err)
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+// UpdateChatTitle renames a chat and bumps updated_at. ErrNotFound when the
+// chat does not exist.
+func (r *ChatsRepo) UpdateChatTitle(ctx context.Context, id, title, updatedAt string) error {
+	return r.execChatUpdate(ctx, "title",
+		`UPDATE chats SET title = ?, updated_at = ? WHERE id = ?`, title, updatedAt, id)
+}
+
+// UpdateChatContext stores the conversation context and bumps updated_at.
+func (r *ChatsRepo) UpdateChatContext(ctx context.Context, id, conversationContext, updatedAt string) error {
+	return r.execChatUpdate(ctx, "context",
+		`UPDATE chats SET conversation_context = ?, updated_at = ? WHERE id = ?`, conversationContext, updatedAt, id)
+}
+
+// SetCompactSummary stores the compact summary and bumps updated_at.
+func (r *ChatsRepo) SetCompactSummary(ctx context.Context, id, summary, updatedAt string) error {
+	return r.execChatUpdate(ctx, "compact summary",
+		`UPDATE chats SET compact_summary = ?, updated_at = ? WHERE id = ?`, summary, updatedAt, id)
+}
+
+// TouchChat bumps updated_at only (message activity marker).
+func (r *ChatsRepo) TouchChat(ctx context.Context, id, updatedAt string) error {
+	return r.execChatUpdate(ctx, "touch",
+		`UPDATE chats SET updated_at = ? WHERE id = ?`, updatedAt, id)
+}
+
+// execChatUpdate runs one single-row chat UPDATE, mapping zero rows affected
+// to ErrNotFound.
+func (r *ChatsRepo) execChatUpdate(ctx context.Context, what, query string, args ...any) error {
+	res, err := r.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("chats update %s: %w", what, err)
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// DeleteMessage removes one message by id. Deleting an already-deleted id is
+// a no-op (nil), matching the regenerate flow's best-effort semantics.
+func (r *ChatsRepo) DeleteMessage(ctx context.Context, id string) error {
+	if _, err := r.db.ExecContext(ctx, `DELETE FROM messages WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("messages delete: %w", err)
+	}
+	return nil
+}
+
+// DeleteMessages removes every message of a chat (the /clear primitive).
+func (r *ChatsRepo) DeleteMessages(ctx context.Context, chatID string) error {
+	if _, err := r.db.ExecContext(ctx, `DELETE FROM messages WHERE chat_id = ?`, chatID); err != nil {
+		return fmt.Errorf("messages delete all: %w", err)
+	}
+	return nil
+}

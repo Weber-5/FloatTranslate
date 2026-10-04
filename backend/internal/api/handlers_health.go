@@ -36,7 +36,9 @@ func (s *Server) pingDB(r *http.Request) error {
 // configured values are the user settings; effective values are clamped by
 // the provider's capabilities when the provider knows them (unknown
 // capability = no clamp). When no provider is configured the configured
-// values are reported unchanged.
+// values are reported unchanged. supports_thinking is a product-level
+// capability (docs/00 §7: the chat thinking toggle always exists; actual
+// reasoning availability is enforced per generation).
 func (s *Server) RuntimeCapabilities(w http.ResponseWriter, r *http.Request) {
 	const (
 		configuredContext = 1_000_000
@@ -59,7 +61,7 @@ func (s *Server) RuntimeCapabilities(w http.ResponseWriter, r *http.Request) {
 		EffectiveContextTokens:   effectiveContext,
 		ConfiguredOutputTokens:   configuredOutput,
 		EffectiveOutputTokens:    effectiveOutput,
-		SupportsThinking:         caps.SupportsThinking,
+		SupportsThinking:         true,
 		SupportsStructuredOutput: caps.SupportsStructuredOutput,
 	})
 }

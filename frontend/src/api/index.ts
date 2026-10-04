@@ -8,11 +8,17 @@ import { createRealClient, probeBackendHealth } from './client'
 
 export { ApiError, toApiError, createRealClient, probeBackendHealth } from './client'
 export { BACKEND_UNAVAILABLE, BACKEND_UNAVAILABLE_MESSAGE } from './client'
+export { createSseParser } from './sse'
+export type { SseEvent, SseParser, SseDataEnvelope } from './sse'
 export type {
   ApiClient,
   BackendConfig,
+  ChatGenerationCompletedData,
   ChatGenerationHandle,
   ChatGenerationHandlers,
+  ChatGenerationStartedInfo,
+  ChatStreamOutcome,
+  StreamOptions,
 } from './client'
 
 let clientPromise: Promise<ApiClient> | null = null

@@ -145,3 +145,39 @@ type HealthResponse struct {
 	Version  string `json:"version"`
 	DBStatus string `json:"db_status"`
 }
+
+// --- Phase 4: AI sidebar (chats / generations / contexts) ---
+
+// Chat mirrors components.schemas.Chat.
+type Chat struct {
+	ID        string `json:"id"`
+	Title     string `json:"title"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+// ChatMessage mirrors components.schemas.ChatMessage.
+type ChatMessage struct {
+	ID               string `json:"id"`
+	Role             string `json:"role"`
+	Content          string `json:"content"`
+	ReasoningContent string `json:"reasoning_content"`
+	CreatedAt        string `json:"created_at"`
+}
+
+// ChatGenerationRequest mirrors components.schemas.ChatGenerationRequest.
+type ChatGenerationRequest struct {
+	Content       string `json:"content"`
+	Thinking      bool   `json:"thinking"`
+	ReferenceText string `json:"reference_text,omitempty"`
+}
+
+// ContextValue mirrors components.schemas.ContextValue.
+type ContextValue struct {
+	Content string `json:"content"`
+}
+
+// CompactResponse is the POST /chats/{id}/compact body.
+type CompactResponse struct {
+	Summary string `json:"summary"`
+}

@@ -72,6 +72,10 @@ pub fn run() {
                 })
                 .build(),
         )
+        // Native message/file dialogs (Phase 4 markdown export). The plugin
+        // dispatches to the main thread itself, so commands may call its
+        // blocking APIs from the async runtime.
+        .plugin(tauri_plugin_dialog::init())
         .setup(setup_app)
         .on_window_event(|window, event| {
             if window.label() != "main" {
@@ -91,7 +95,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_backend_config,
-            commands::apply_hotkeys
+            commands::apply_hotkeys,
+            commands::export_markdown
         ]);
 
     let app = match builder.build(tauri::generate_context!()) {

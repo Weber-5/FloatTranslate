@@ -187,6 +187,19 @@ func (s *ProviderSettingsStore) TranslationModel() string {
 	return view.TranslationModel
 }
 
+// ChatModel returns the configured chat model for the chat generation
+// service (same default as the translation model slot).
+func (s *ProviderSettingsStore) ChatModel() string {
+	view, err := s.View(context.Background())
+	if err != nil {
+		return translation.DefaultTranslationModel
+	}
+	if strings.TrimSpace(view.ChatModel) == "" {
+		return translation.DefaultTranslationModel
+	}
+	return view.ChatModel
+}
+
 func applyString(stored map[string]json.RawMessage, key string, dst *string) {
 	if raw, ok := stored[key]; ok {
 		var v string

@@ -398,6 +398,12 @@ func (s *scriptProvider) Capabilities() llm.Capabilities {
 	return llm.Capabilities{SupportsThinking: true, SupportsStructuredOutput: true}
 }
 
+// Stream satisfies the Phase 4 Provider surface; the translation pipeline
+// never streams, so tests only need the method to exist.
+func (s *scriptProvider) Stream(_ context.Context, _ llm.StreamRequest, _ func(llm.StreamDelta)) error {
+	return llm.ErrUnavailable
+}
+
 func (s *scriptProvider) callCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -800,6 +806,12 @@ func (c *chunkEchoProvider) Complete(_ context.Context, req llm.CompleteRequest)
 
 func (c *chunkEchoProvider) Capabilities() llm.Capabilities {
 	return llm.Capabilities{SupportsThinking: true, SupportsStructuredOutput: true}
+}
+
+// Stream satisfies the Phase 4 Provider surface; the translation pipeline
+// never streams.
+func (c *chunkEchoProvider) Stream(_ context.Context, _ llm.StreamRequest, _ func(llm.StreamDelta)) error {
+	return llm.ErrUnavailable
 }
 
 func (c *chunkEchoProvider) callCount() int {

@@ -67,12 +67,66 @@ type Capabilities struct {
 	SupportsStructuredOutput bool
 }
 
-// Provider abstracts an LLM backend. Stream, TestConnection and the chat
-// pipeline join in later phases; Phase 1 only requires Complete.
+// ChatMessage is one provider-protocol chat message (Phase 4 chat pipeline:
+// system/user/assistant roles, plain-text content).
+type ChatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+// StreamRequest is a streaming chat completion request (Phase 4 chat
+// generation, docs/06 §9-11).
+type StreamRequest struct {
+	// Model is the chat model string to use.
+	Model string
+	// Messages is the fully composed provider message list (system context
+	// messages first, then the conversation, docs/06 §9 order).
+	Messages []ChatMessage
+	// Thinking requests the provider's reasoning mode; when true the adapter
+	// sends the enable_thinking control field (never for translation).
+	Thinking bool
+}
+
+// StreamDelta is one parsed provider stream event. At most one of Reasoning
+// and Content is non-empty per delta.
+type StreamDelta struct {
+	// Reasoning is a reasoning/thinking text fragment (SSE reasoning.delta).
+	Reasoning string
+	// Content is an answer content fragment (SSE content.delta).
+	Content string
+}
+
+// Provider abstracts an LLM backend.
 type Provider interface {
 	// Complete performs a non-streaming completion and returns the raw JSON
 	// payload string. Errors map to the Err* sentinels above.
 	Complete(ctx context.Context, req CompleteRequest) (CompleteResponse, error)
+	// Stream runs a streaming chat completion, invoking onDelta once per
+	// reasoning/content fragment in provider order. It returns nil after the
+	// provider finishes its stream; errors map to the Err* sentinels. When
+	// ctx is canceled the call aborts and the returned error satisfies
+	// errors.Is(err, context.Canceled) — the chat layer treats that as a
+	// user-initiated cancel, not a provider failure.
+	Stream(ctx context.Context, req StreamRequest, onDelta func(StreamDelta)) error
 	// Capabilities reports provider/model capabilities.
 	Capabilities() Capabilities
+}
+
+// ChatCompletionRequest is a plain (non-structured, non-streaming) chat
+// completion request — used by the chat compact flow (docs/06 §10).
+type ChatCompletionRequest struct {
+	// Model is the chat model string to use.
+	Model string
+	// Messages is the full message list (no response_format is ever applied;
+	// the answer is plain text).
+	Messages []ChatMessage
+}
+
+// PlainCompleter is the optional Provider extension for plain-text chat
+// completions. The OpenAI-compatible adapter implements it; providers that
+// only implement Complete fall back to a JSON-summary completion in the chat
+// service.
+type PlainCompleter interface {
+	// ChatComplete returns the model's plain-text answer (whitespace-trimmed).
+	ChatComplete(ctx context.Context, req ChatCompletionRequest) (string, error)
 }

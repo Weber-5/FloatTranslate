@@ -31,6 +31,14 @@ func (w *statusRecorder) Status() int {
 	return http.StatusOK
 }
 
+// Flush forwards http.Flusher so SSE handlers behind the logging middleware
+// can flush streaming events.
+func (w *statusRecorder) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 // RequestLog logs one line per request: method, path, status and duration
 // only. Query strings, headers and bodies are deliberately never logged.
 // The logger itself runs behind the redaction handler (defense in depth).

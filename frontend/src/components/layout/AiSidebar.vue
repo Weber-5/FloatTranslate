@@ -1,19 +1,25 @@
 <script setup lang="ts">
 /**
- * AI Sidebar (docs/03 §9): session switcher, messages area with collapsible
- * reasoning, composer with Enter send / Shift+Enter newline, thinking toggle,
- * slash command picker (/compact /clear /context /export), send / stop.
- * Phase 1 uses the mock generation stream (display logic only).
+ * AI Sidebar (docs/03 §9): session switcher, messages area with sanitized
+ * Markdown + collapsible reasoning, composer with Enter send / Shift+Enter
+ * newline, thinking toggle, slash command picker (/compact /clear /context
+ * /export), reference chip for Ask AI, regenerate on the last assistant
+ * message and send / stop swap during streaming.
+ * Phase 4: streams into the DOM through the store's dedicated buffers.
  */
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useChatsStore } from '@/stores/chats'
+import { useSettingsStore } from '@/stores/settings'
 import { useUiStore } from '@/stores/ui'
+import { composeChatMarkdown, exportMarkdownToDisk } from '@/services/export'
 import IconButton from '@/components/common/IconButton.vue'
+import MarkdownContent from '@/components/common/MarkdownContent.vue'
 import IconChevronDown from '@/components/icons/IconChevronDown.vue'
 import IconClose from '@/components/icons/IconClose.vue'
 import IconEdit from '@/components/icons/IconEdit.vue'
 import IconPlus from '@/components/icons/IconPlus.vue'
+import IconRefresh from '@/components/icons/IconRefresh.vue'
 import IconSend from '@/components/icons/IconSend.vue'
 import IconStop from '@/components/icons/IconStop.vue'
 import IconTrash from '@/components/icons/IconTrash.vue'
@@ -24,6 +30,7 @@ import ConfirmModal from '@/components/common/ConfirmModal.vue'
 
 const { t } = useI18n()
 const chats = useChatsStore()
+const settings = useSettingsStore()
 const ui = useUiStore()
 
 const COMMANDS = ['compact', 'clear', 'context', 'export'] as const
@@ -44,8 +51,7 @@ const slashOpen = ref(false)
 const slashIndex = ref(0)
 const contextEditorOpen = ref(false)
 const contextDraft = ref('')
-const contextSaved = ref(false)
-const compactNotice = ref(false)
+const contextSaving = ref(false)
 const deleteTargetId = ref<string | null>(null)
 const messagesEl = ref<HTMLElement | null>(null)
 
@@ -59,8 +65,12 @@ const deleteTargetTitle = computed(
   () => chats.chats.find((chat) => chat.id === deleteTargetId.value)?.title ?? '',
 )
 
+/** Thinking needs provider support (docs/06 §11); off by default. */
+const thinkingSupported = computed(() => settings.capabilities?.supports_thinking !== false)
+
 onMounted(() => {
   void chats.ensureLoaded()
+  void settings.load()
 })
 
 watch(
@@ -84,6 +94,10 @@ function updateSlashMenu(): void {
 }
 
 function onComposerKeydown(event: KeyboardEvent): void {
+  if (event.key === 'Escape' && slashOpen.value) {
+    slashOpen.value = false
+    return
+  }
   if (slashOpen.value && filteredCommands.value.length > 0) {
     if (event.key === 'ArrowDown') {
       event.preventDefault()
@@ -101,7 +115,7 @@ function onComposerKeydown(event: KeyboardEvent): void {
   if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
     event.preventDefault()
     if (slashOpen.value && filteredCommands.value.length > 0) {
-      runCommand(filteredCommands.value[slashIndex.value])
+      void runCommand(filteredCommands.value[slashIndex.value])
     } else {
       send()
     }
@@ -111,66 +125,79 @@ function onComposerKeydown(event: KeyboardEvent): void {
 function send(): void {
   const content = draft.value.trim()
   if (content.length === 0 || chats.isGenerating) return
+  const reference = chats.referenceText
   draft.value = ''
   slashOpen.value = false
-  void chats.send(content)
+  void chats.send(content, { referenceText: reference })
 }
 
-function runCommand(command: SlashCommand): void {
+async function runCommand(command: SlashCommand): Promise<void> {
   draft.value = ''
   slashOpen.value = false
   if (command === 'clear') {
-    if (chats.activeChatId) void chats.clearMessages(chats.activeChatId)
+    // /clear executes immediately — NO confirm (docs/00 §7).
+    if (chats.activeChatId) await chats.clearMessages(chats.activeChatId)
     return
   }
   if (command === 'context') {
-    void openContextEditor()
+    await openContextEditor()
     return
   }
   if (command === 'compact') {
-    compactNotice.value = true
-    window.setTimeout(() => {
-      compactNotice.value = false
-    }, 4000)
+    await runCompact()
     return
   }
   if (command === 'export') {
-    exportMarkdown()
+    await exportMarkdown()
+  }
+}
+
+/** /compact: spinner note while running, done toast afterwards. */
+async function runCompact(): Promise<void> {
+  const summary = await chats.compact()
+  if (summary !== null) {
+    ui.showToast(t('ai.compactDone'), 'success')
   }
 }
 
 async function openContextEditor(): Promise<void> {
   contextDraft.value = await chats.loadConversationContext()
-  contextSaved.value = false
   contextEditorOpen.value = true
 }
 
 async function saveContext(): Promise<void> {
-  await chats.saveConversationContext(contextDraft.value)
-  contextEditorOpen.value = false
-  contextSaved.value = true
-  window.setTimeout(() => {
-    contextSaved.value = false
-  }, 2500)
+  contextSaving.value = true
+  try {
+    await chats.saveConversationContext(contextDraft.value)
+    contextEditorOpen.value = false
+    ui.showToast(t('ai.contextSaved'), 'success')
+  } finally {
+    contextSaving.value = false
+  }
 }
 
-function exportMarkdown(): void {
+/** /export: compose Markdown and hand it to the Tauri host (blob fallback). */
+async function exportMarkdown(): Promise<void> {
   const chat = chats.activeChat
   if (!chat) return
-  const lines: string[] = [`# ${chat.title}`, '']
-  for (const message of chats.activeMessages) {
-    lines.push(`## ${message.role === 'user' ? 'User' : 'Assistant'}`, '', message.content, '')
-    if (message.reasoning_content) {
-      lines.push('> Reasoning: ' + message.reasoning_content, '')
-    }
+  const content = composeChatMarkdown(
+    chat,
+    chats.activeMessages,
+    t('ai.roleUser'),
+    t('ai.roleAssistant'),
+    t('ai.exportedAt'),
+    new Date().toLocaleString(),
+  )
+  const result = await exportMarkdownToDisk(`${chat.title}.md`, content)
+  if (result.cancelled) return
+  if (result.ok) {
+    ui.showToast(
+      result.path ? t('ai.exported', { path: result.path }) : t('ai.exportedDownload'),
+      'success',
+    )
+  } else {
+    ui.showToast(t('ai.exportFailed'), 'error')
   }
-  const blob = new Blob([lines.join('\n')], { type: 'text/markdown;charset=utf-8' })
-  const url = URL.createObjectURL(blob)
-  const anchor = document.createElement('a')
-  anchor.href = url
-  anchor.download = `${chat.title}.md`
-  anchor.click()
-  URL.revokeObjectURL(url)
 }
 
 function startRename(id: string, currentTitle: string): void {
@@ -201,6 +228,10 @@ async function confirmDeleteChat(): Promise<void> {
   if (deleteTargetId.value) await chats.deleteChat(deleteTargetId.value)
   deleteTargetId.value = null
   if (chats.chats.length === 0) await chats.newChat()
+}
+
+function toggleThinking(): void {
+  if (thinkingSupported.value) chats.thinkingEnabled = !chats.thinkingEnabled
 }
 </script>
 
@@ -289,7 +320,22 @@ async function confirmDeleteChat(): Promise<void> {
             <summary>{{ t('ai.reasoning') }}</summary>
             <p class="reasoning-body">{{ message.reasoning_content }}</p>
           </details>
-          <div class="message-content">{{ message.content }}</div>
+          <MarkdownContent
+            v-if="message.role === 'assistant'"
+            :source="message.content"
+            class="message-content"
+          />
+          <div v-else class="message-content">{{ message.content }}</div>
+          <button
+            v-if="chats.lastMessage && message.id === chats.lastMessage.id && message.role === 'assistant' && chats.canRegenerate"
+            type="button"
+            class="regenerate-btn"
+            data-testid="ai-regenerate"
+            @click="chats.regenerate()"
+          >
+            <IconRefresh :size="12" />
+            {{ t('ai.regenerate') }}
+          </button>
         </div>
       </template>
 
@@ -302,12 +348,14 @@ async function confirmDeleteChat(): Promise<void> {
           <summary>{{ t('ai.reasoning') }}</summary>
           <p class="reasoning-body">{{ chats.streamingMessage.reasoning_content }}</p>
         </details>
-        <div class="message-content">
-          {{ chats.streamingMessage.content }}<span class="stream-cursor" aria-hidden="true" />
-        </div>
+        <MarkdownContent :source="chats.streamingMessage.content" class="message-content" />
+        <span class="stream-cursor" aria-hidden="true" />
       </div>
 
       <p v-if="chats.isGenerating" class="system-note">{{ t('ai.streaming') }}</p>
+      <p v-if="chats.compactRunning" class="system-note" data-testid="compact-running">
+        {{ t('ai.compacting') }}
+      </p>
       <p v-if="chats.generationStatus === 'cancelled'" class="system-note">
         {{ t('ai.cancelled') }}
       </p>
@@ -316,39 +364,21 @@ async function confirmDeleteChat(): Promise<void> {
         variant="error"
         :title="t('ai.generationError')"
         :message="chats.generationError"
-        class="message-error"
+        show-retry
+        class="message-banner"
+        @retry="chats.retry()"
       />
       <StateBanner
-        v-if="compactNotice"
+        v-if="chats.compactHint"
         variant="info"
-        :message="t('ai.compactNotice')"
-        class="message-error"
-      />
-      <StateBanner
-        v-if="contextSaved"
-        variant="success"
-        :message="t('ai.contextSaved')"
-        class="message-error"
-      />
-
-      <div v-if="contextEditorOpen" class="context-editor">
-        <p class="context-title">{{ t('ai.contextEditorTitle') }}</p>
-        <textarea
-          v-model="contextDraft"
-          class="textarea"
-          rows="5"
-          :placeholder="t('ai.contextEditorPlaceholder')"
-          :aria-label="t('ai.contextEditorTitle')"
-        />
-        <div class="context-actions">
-          <button type="button" class="btn btn-secondary" @click="contextEditorOpen = false">
-            {{ t('common.cancel') }}
-          </button>
-          <button type="button" class="btn btn-primary" @click="saveContext">
-            {{ t('common.save') }}
-          </button>
-        </div>
-      </div>
+        :message="t('ai.compactHint')"
+        class="message-banner"
+        data-testid="compact-hint"
+      >
+        <button type="button" class="btn btn-ghost banner-action" @click="runCompact">
+          {{ t('ai.runCompact') }}
+        </button>
+      </StateBanner>
     </div>
 
     <footer class="ai-composer">
@@ -368,6 +398,20 @@ async function confirmDeleteChat(): Promise<void> {
         </button>
       </div>
 
+      <div v-if="chats.referenceText" class="reference-chip" data-testid="reference-chip">
+        <span class="reference-label">{{ t('ai.referenceLabel') }}</span>
+        <span class="reference-text">{{ chats.referenceText }}</span>
+        <button
+          type="button"
+          class="reference-clear"
+          data-testid="reference-clear"
+          :aria-label="t('ai.clearReference')"
+          @click="chats.referenceText = ''"
+        >
+          <IconClose :size="11" />
+        </button>
+      </div>
+
       <textarea
         v-model="draft"
         class="composer-input"
@@ -383,10 +427,13 @@ async function confirmDeleteChat(): Promise<void> {
         <button
           type="button"
           class="thinking-toggle"
-          :class="{ on: chats.thinkingEnabled }"
+          :class="{ on: chats.thinkingEnabled && thinkingSupported }"
           :aria-pressed="chats.thinkingEnabled"
           :aria-label="t('ai.thinking')"
-          @click="chats.thinkingEnabled = !chats.thinkingEnabled"
+          :disabled="!thinkingSupported"
+          :title="thinkingSupported ? undefined : t('ai.thinkingUnsupported')"
+          data-testid="thinking-toggle"
+          @click="toggleThinking"
         >
           <IconZap :size="13" />
           {{ t('ai.thinking') }}
@@ -423,6 +470,47 @@ async function confirmDeleteChat(): Promise<void> {
       @confirm="confirmDeleteChat"
       @cancel="deleteTargetId = null"
     />
+
+    <!-- Conversation Context editor (docs/00 §7 /context): modal, 保存/取消. -->
+    <Teleport to="body">
+      <div
+        v-if="contextEditorOpen"
+        class="context-backdrop"
+        data-testid="context-modal"
+        @click.self="contextEditorOpen = false"
+      >
+        <div class="context-editor" role="dialog" :aria-label="t('ai.contextEditorTitle')" aria-modal="true">
+          <p class="context-title">{{ t('ai.contextEditorTitle') }}</p>
+          <textarea
+            v-model="contextDraft"
+            class="textarea"
+            rows="6"
+            data-testid="context-textarea"
+            :placeholder="t('ai.contextEditorPlaceholder')"
+            :aria-label="t('ai.contextEditorTitle')"
+          />
+          <div class="context-actions">
+            <button
+              type="button"
+              class="btn btn-secondary"
+              data-testid="context-cancel"
+              @click="contextEditorOpen = false"
+            >
+              {{ t('common.cancel') }}
+            </button>
+            <button
+              type="button"
+              class="btn btn-primary"
+              data-testid="context-save"
+              :disabled="contextSaving"
+              @click="saveContext"
+            >
+              {{ t('common.save') }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
   </aside>
 </template>
 
@@ -579,8 +667,27 @@ async function confirmDeleteChat(): Promise<void> {
 }
 
 .message-assistant .message-content {
-  white-space: pre-wrap;
   word-break: break-word;
+}
+
+.message-tools {
+  margin-top: 2px;
+}
+
+.regenerate-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: var(--space-1);
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.regenerate-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-secondary);
 }
 
 .reasoning {
@@ -626,18 +733,36 @@ async function confirmDeleteChat(): Promise<void> {
   color: var(--text-tertiary);
 }
 
-.message-error {
+.message-banner {
   align-self: stretch;
+}
+
+.banner-action {
+  flex: none;
+  font-size: 12px;
+}
+
+.context-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgb(0 0 0 / 0.35);
+  padding: var(--space-4);
 }
 
 .context-editor {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
-  padding: var(--space-3);
+  width: min(440px, 100%);
+  padding: var(--space-4);
   border: 1px solid var(--hairline);
   border-radius: var(--radius-lg);
   background: var(--bg-surface);
+  box-shadow: var(--shadow-2);
 }
 
 .context-title {
@@ -660,6 +785,45 @@ async function confirmDeleteChat(): Promise<void> {
   padding: var(--space-3);
   border-top: 1px solid var(--hairline);
   background: var(--bg-surface-2);
+}
+
+.reference-chip {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 4px 8px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-md);
+  background: var(--bg-inset);
+  font-size: 12px;
+}
+
+.reference-label {
+  flex: none;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.reference-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-secondary);
+}
+
+.reference-clear {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border-radius: var(--radius-sm);
+  color: var(--text-tertiary);
+}
+
+.reference-clear:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
 }
 
 .slash-menu {
@@ -754,6 +918,11 @@ async function confirmDeleteChat(): Promise<void> {
   color: var(--accent);
   border-color: var(--accent);
   background: var(--accent-soft);
+}
+
+.thinking-toggle:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .composer-send {

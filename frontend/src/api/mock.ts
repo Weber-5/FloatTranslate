@@ -30,7 +30,7 @@ import type {
   VocabularyItem,
   WordTranslation,
 } from './types'
-import type { ApiClient, ChatGenerationHandle, ChatGenerationHandlers } from './client'
+import type { ApiClient, ChatGenerationHandle, ChatGenerationHandlers, ChatStreamOutcome, StreamOptions } from './client'
 import { ApiError } from './client'
 import { buildWordTranslation, GLOSS, SURFACE_TO_LEMMA } from '@/lib/wordData'
 import { DEFAULT_AI_SYSTEM_PROMPT } from '@/constants'
@@ -102,6 +102,10 @@ interface MockState {
   messages: Map<string, ChatMessage[]>
   conversationContext: Map<string, string>
   globalContext: string
+  /** Chat ids with a generation in flight (mirrors backend 409 behaviour). */
+  activeGenerations: Set<string>
+  /** Thinking flag of the last generation per chat, reused by regenerate. */
+  lastThinking: Map<string, boolean>
 }
 
 function defaultSettings(): AppSettings {
@@ -169,6 +173,8 @@ function createInitialState(): MockState {
     messages: new Map([[chatId, []]]),
     conversationContext: new Map([[chatId, '']]),
     globalContext: '',
+    activeGenerations: new Set(),
+    lastThinking: new Map(),
   }
 }
 
@@ -243,6 +249,156 @@ export function createMockClient(): ApiClient {
       created_at: now,
     })
     return response
+  }
+
+  /** Chats whose trigger-error already fired: the failure is transient so
+   * the retryable-error → retry flow can be demoed and tested. */
+  const transientErrorFired = new Set<string>()
+
+  const MOCK_REASONING =
+    '先拆解用户的问题，确认它是在询问解释还是翻译，再组织一段简洁的中文回答。'
+
+  function appendMockMessage(chatId: string, message: ChatMessage): void {
+    if (!state.messages.has(chatId)) state.messages.set(chatId, [])
+    state.messages.get(chatId)!.push(message)
+    const chat = state.chats.find((entry) => entry.id === chatId)
+    if (chat) chat.updated_at = message.created_at
+  }
+
+  /**
+   * Builds one simulated generation: schedules the whole started → deltas →
+   * completed timeline on timers and returns a handler-accepting starter.
+   * `cancel()` on the handle stops at the next tick and emits cancelled,
+   * keeping whatever content was already streamed.
+   */
+  function runMockGeneration(
+    chatId: string,
+    content: string,
+    opts: { thinking: boolean; forceError: boolean },
+  ): (handlers: ChatGenerationHandlers) => Promise<ChatGenerationHandle> {
+    return (handlers) => {
+      const generationId = nextId('gen')
+      const timers: ReturnType<typeof setTimeout>[] = []
+      let finished = false
+      let emittedContent = ''
+      let resolvePromise!: (value: ChatStreamOutcome) => void
+      const promise = new Promise<ChatStreamOutcome>((resolve) => {
+        resolvePromise = resolve
+      })
+
+      function finish(outcome: ChatStreamOutcome): void {
+        if (finished) return
+        finished = true
+        for (const timer of timers) clearTimeout(timer)
+        timers.length = 0
+        state.activeGenerations.delete(chatId)
+        resolvePromise(outcome)
+      }
+
+      const reasoning = opts.thinking ? MOCK_REASONING : ''
+
+      type Step = { delay: number; kind: 'reasoning' | 'content'; text: string }
+      const steps: Step[] = []
+      let delay = 150
+      timers.push(
+        setTimeout(() => {
+          if (finished) return
+          handlers.onStarted?.(generationId, {
+            chat_id: chatId,
+            model: TRANSLATION_MODEL,
+            thinking: opts.thinking,
+          })
+        }, delay),
+      )
+      delay += 100
+      if (reasoning) {
+        for (const chunk of reasoning.match(/.{1,12}/gu) ?? []) {
+          steps.push({ delay, kind: 'reasoning', text: chunk })
+          delay += 60
+        }
+      }
+      const words = content.match(/\S+\s*/gsu) ?? [content]
+      let emittedWords = 0
+      for (const word of words) {
+        steps.push({ delay, kind: 'content', text: word })
+        delay += 60
+        emittedWords += 1
+        if (opts.forceError && emittedWords === 2) {
+          steps.push({ delay, kind: 'content', text: '' }) // placeholder keeps ordering readable
+          delay += 60
+          break
+        }
+      }
+
+      for (const step of steps) {
+        timers.push(
+          setTimeout(() => {
+            if (finished) return
+            if (step.kind === 'reasoning') {
+              handlers.onReasoningDelta?.(step.text)
+            } else if (step.text) {
+              emittedContent += step.text
+              handlers.onContentDelta?.(step.text)
+            } else if (opts.forceError) {
+              handlers.onError?.(
+                new ApiError('TRANSLATION_FAILED', '模拟的 Provider 错误：请点击重试。', true),
+                generationId,
+              )
+              finish('error')
+            }
+          }, step.delay),
+        )
+      }
+
+      timers.push(
+        setTimeout(() => {
+          if (finished) return
+          const now = new Date().toISOString()
+          const message: ChatMessage = {
+            id: nextId('msg'),
+            role: 'assistant',
+            content,
+            ...(reasoning ? { reasoning_content: reasoning } : {}),
+            created_at: now,
+          }
+          appendMockMessage(chatId, message)
+          handlers.onCompleted?.(generationId, {
+            message_id: message.id,
+            reasoning_content: reasoning || undefined,
+            content,
+            finish_reason: 'stop',
+          })
+          finish('completed')
+        }, delay + 80),
+      )
+
+      return Promise.resolve({
+        generationId,
+        promise,
+        cancel() {
+          if (finished) return
+          for (const timer of timers) clearTimeout(timer)
+          timers.length = 0
+          // Stop at the NEXT tick, like a real stream that still has to
+          // deliver the generation.cancelled frame.
+          timers.push(
+            setTimeout(() => {
+              if (finished) return
+              if (emittedContent.length > 0) {
+                appendMockMessage(chatId, {
+                  id: nextId('msg'),
+                  role: 'assistant',
+                  content: emittedContent,
+                  created_at: new Date().toISOString(),
+                })
+              }
+              handlers.onCancelled?.(generationId)
+              finish('cancelled')
+            }, 0),
+          )
+        },
+      })
+    }
   }
 
   const client: ApiClient = {
@@ -473,70 +629,88 @@ export function createMockClient(): ApiClient {
       state.conversationContext.set(chatId, value.content)
     },
 
+    /**
+     * Simulates the full SSE generation lifecycle (docs/04 §11) with timers:
+     * started → reasoning.delta (if thinking) → content.delta word-by-word →
+     * completed. cancel() stops at the NEXT tick and emits cancelled, like a
+     * real stream would. Scriptable failure hooks for tests:
+     * - content containing "trigger-409" → 409 GENERATION_ALREADY_ACTIVE
+     * - content containing "trigger-error" → generation.error mid-stream
+     * A second concurrent generation on the same chat also yields the 409.
+     */
     async streamChatGeneration(
-      _chatId: string,
+      chatId: string,
       request: ChatGenerationRequest,
       handlers: ChatGenerationHandlers,
+      _options?: StreamOptions,
     ): Promise<ChatGenerationHandle> {
-      const generationId = nextId('gen')
-      const timers: ReturnType<typeof setTimeout>[] = []
-      let cancelled = false
-
-      const content = buildMockReply(request.content)
-      const reasoning = request.thinking
-        ? '先拆解用户的问题，确认它是在询问解释还是翻译，再组织一段简洁的中文回答。'
-        : ''
-
-      type Step = { delay: number; kind: 'reasoning' | 'content'; text: string }
-      const steps: Step[] = []
-      let delay = 250
-      if (reasoning) {
-        for (const chunk of reasoning.match(/.{1,12}/gu) ?? []) {
-          steps.push({ delay, kind: 'reasoning', text: chunk })
-          delay += 90
-        }
+      if (/trigger[- ]?409/i.test(request.content)) {
+        throw new ApiError('GENERATION_ALREADY_ACTIVE', '该会话已有生成任务进行中', false, {
+          http_status: 409,
+        })
       }
-      for (const chunk of content.match(/.{1,10}/gsu) ?? []) {
-        steps.push({ delay, kind: 'content', text: chunk })
-        delay += 70
+      if (state.activeGenerations.has(chatId)) {
+        throw new ApiError('GENERATION_ALREADY_ACTIVE', '该会话已有生成任务进行中', false, {
+          http_status: 409,
+        })
       }
+      state.activeGenerations.add(chatId)
+      state.lastThinking.set(chatId, request.thinking === true)
 
-      for (const step of steps) {
-        timers.push(
-          setTimeout(() => {
-            if (cancelled) return
-            if (step.kind === 'reasoning') handlers.onReasoningDelta?.(step.text)
-            else handlers.onContentDelta?.(step.text)
-          }, step.delay),
-        )
+      // The backend persists the user message when POST /generations lands.
+      if (!state.messages.has(chatId)) state.messages.set(chatId, [])
+      state.messages.get(chatId)!.push({
+        id: nextId('msg'),
+        role: 'user',
+        content: request.content,
+        created_at: new Date().toISOString(),
+      })
+
+      // "trigger-error" fails the FIRST attempt only (retryable semantics),
+      // so retry() can complete the turn.
+      const wantsError = /trigger[- ]?error/i.test(request.content)
+      const forceError = wantsError && !transientErrorFired.has(chatId)
+      if (wantsError) transientErrorFired.add(chatId)
+      return runMockGeneration(chatId, buildMockReply(request.content), {
+        thinking: request.thinking === true,
+        forceError,
+      })(handlers)
+    },
+
+    async regenerateChat(
+      chatId: string,
+      handlers: ChatGenerationHandlers,
+      _options?: StreamOptions,
+    ): Promise<ChatGenerationHandle> {
+      if (state.activeGenerations.has(chatId)) {
+        throw new ApiError('GENERATION_ALREADY_ACTIVE', '该会话已有生成任务进行中', false, {
+          http_status: 409,
+        })
       }
-      timers.push(
-        setTimeout(() => {
-          if (!cancelled) handlers.onCompleted?.(generationId)
-        }, delay + 80),
+      const history = state.messages.get(chatId) ?? []
+      if (history.length === 0 || history[history.length - 1].role !== 'assistant') {
+        throw new ApiError('INVALID_REQUEST', '没有可重新生成的回答', false)
+      }
+      state.activeGenerations.add(chatId)
+      // The backend deletes the last assistant answer and regenerates it.
+      state.messages.set(
+        chatId,
+        history.filter((_, index) => index !== history.length - 1),
       )
+      const lastUser = [...(state.messages.get(chatId) ?? [])]
+        .reverse()
+        .find((message) => message.role === 'user')
+      return runMockGeneration(
+        chatId,
+        buildMockReply(lastUser?.content ?? ''),
+        { thinking: state.lastThinking.get(chatId) === true, forceError: false },
+      )(handlers)
+    },
 
-      await sleep(120)
-      if (cancelled) {
-        handlers.onCancelled?.(generationId)
-        return {
-          generationId,
-          cancel() {
-            /* already cancelled */
-          },
-        }
-      }
-      handlers.onStarted?.(generationId)
-
-      return {
-        generationId,
-        cancel() {
-          if (cancelled) return
-          cancelled = true
-          for (const timer of timers) clearTimeout(timer)
-          handlers.onCancelled?.(generationId)
-        },
-      }
+    async compactChat(chatId: string) {
+      await sleep(400)
+      const count = (state.messages.get(chatId) ?? []).length
+      return { summary: `Mock 摘要：会话共 ${count} 条消息，较早上下文已压缩为要点。` }
     },
 
     async exportBackup(_path: string) {
@@ -577,6 +751,8 @@ export function createMockClient(): ApiClient {
       state.messages = fresh.messages
       state.conversationContext = fresh.conversationContext
       state.globalContext = fresh.globalContext
+      state.activeGenerations = fresh.activeGenerations
+      state.lastThinking = fresh.lastThinking
     },
   }
 

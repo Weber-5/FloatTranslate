@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Weber-5/FloatTranslate/backend/internal/chat"
 	"github.com/Weber-5/FloatTranslate/backend/internal/config"
 	"github.com/Weber-5/FloatTranslate/backend/internal/database"
 	"github.com/Weber-5/FloatTranslate/backend/internal/llm"
@@ -62,9 +63,11 @@ func newTestHandlerWithResolver(t *testing.T, resolver llm.Resolver) http.Handle
 	if err != nil {
 		t.Fatalf("pipeline: %v", err)
 	}
+	chatsRepo := repository.NewChatsRepo(db)
+	chatSvc := chat.NewService(chatsRepo, settingsRepo, resolver, providerSettings.ChatModel, nil)
 	logger := logging.New(io.Discard, slog.LevelError, logging.NewRedactor())
 	return NewServer(cfg, logger, pipeline, settingsRepo, historyRepo, tabsRepo, vocabularyRepo,
-		terms, providerSettings, resolver, db.Ping).Handler()
+		terms, chatsRepo, chatSvc, providerSettings, resolver, db.Ping).Handler()
 }
 
 // do performs a request and returns status + decoded JSON body (nil when the

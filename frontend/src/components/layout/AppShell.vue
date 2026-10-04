@@ -1,7 +1,8 @@
 <script setup lang="ts">
 /**
  * App shell: title bar + body (router-view) + bottom nav, with the AI
- * sidebar as a right panel and the history drawer as an overlay.
+ * sidebar as a right panel, the history drawer as an overlay and the global
+ * toast host for inline business notices (docs/03 §11).
  * Restores persisted tabs on mount and hydrates them from stored
  * translations; flushes tab persistence on unload.
  */
@@ -55,6 +56,21 @@ onBeforeUnmount(() => {
     </div>
     <AiSidebar v-if="ui.sidebarOpen" class="app-sidebar" />
     <HistoryDrawer />
+    <div class="toast-host" aria-live="polite">
+      <TransitionGroup name="toast">
+        <div
+          v-for="toast in ui.toasts"
+          :key="toast.id"
+          class="toast"
+          :class="`toast-${toast.tone}`"
+          data-testid="toast"
+          role="status"
+          @click="ui.dismissToast(toast.id)"
+        >
+          {{ toast.message }}
+        </div>
+      </TransitionGroup>
+    </div>
   </div>
 </template>
 
@@ -96,5 +112,55 @@ onBeforeUnmount(() => {
     transform: translateX(0);
     opacity: 1;
   }
+}
+
+.toast-host {
+  position: fixed;
+  bottom: 56px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  z-index: 80;
+  pointer-events: none;
+}
+
+.toast {
+  pointer-events: auto;
+  max-width: min(420px, 86vw);
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-lg);
+  font-size: 13px;
+  background: var(--bg-surface);
+  border: 1px solid var(--hairline);
+  box-shadow: var(--shadow-2);
+  color: var(--text-primary);
+  cursor: pointer;
+  word-break: break-word;
+}
+
+.toast-success {
+  border-color: var(--success);
+  color: var(--success);
+}
+
+.toast-error {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.toast-enter-active,
+.toast-leave-active {
+  transition:
+    opacity var(--transition-fast),
+    transform var(--transition-fast);
+}
+
+.toast-enter-from,
+.toast-leave-to {
+  opacity: 0;
+  transform: translateY(6px);
 }
 </style>

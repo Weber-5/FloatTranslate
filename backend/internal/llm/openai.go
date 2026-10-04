@@ -95,9 +95,11 @@ type chatMessage struct {
 	Content string `json:"content"`
 }
 
-// chatRequest is the frozen Phase 2 translation request shape. There is
-// deliberately no thinking/reasoning field: translation thinking is always
-// off and unknown fields must not be sent to best-effort providers.
+// chatRequest is the Chat Completions request shape. Translation (Complete)
+// always leaves EnableThinking nil so the field is never serialized
+// (docs/06 §11: translation thinking is always off and unknown fields must
+// not be sent to best-effort providers); Stream sets it to true only when
+// thinking was requested.
 type chatRequest struct {
 	Model          string          `json:"model"`
 	Messages       []chatMessage   `json:"messages"`
@@ -105,6 +107,7 @@ type chatRequest struct {
 	Temperature    float64         `json:"temperature"`
 	ResponseFormat *responseFormat `json:"response_format,omitempty"`
 	MaxTokens      *int            `json:"max_tokens,omitempty"`
+	EnableThinking *bool           `json:"enable_thinking,omitempty"`
 }
 
 type responseFormat struct {
@@ -235,6 +238,15 @@ func truncateResponse(body []byte) string {
 		s = s[:200] + "…"
 	}
 	return s
+}
+
+// toWireChatMessages converts the public ChatMessage shape to the wire shape.
+func toWireChatMessages(msgs []ChatMessage) []chatMessage {
+	out := make([]chatMessage, 0, len(msgs))
+	for _, m := range msgs {
+		out = append(out, chatMessage{Role: m.Role, Content: m.Content})
+	}
+	return out
 }
 
 // joinURL joins a base URL and an endpoint path.

@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/Weber-5/FloatTranslate/backend/internal/api"
+	"github.com/Weber-5/FloatTranslate/backend/internal/chat"
 	"github.com/Weber-5/FloatTranslate/backend/internal/config"
 	"github.com/Weber-5/FloatTranslate/backend/internal/database"
 	"github.com/Weber-5/FloatTranslate/backend/internal/logging"
@@ -65,25 +66,28 @@ func run() error {
 	cacheRepo := repository.NewCacheRepo(db)
 	tabsRepo := repository.NewTabsRepo(db)
 	vocabularyRepo := repository.NewVocabularyRepo(db)
+	chatsRepo := repository.NewChatsRepo(db)
 	termsSvc, err := terminology.NewService(context.Background(), repository.NewTerminologyRepo(db))
 	if err != nil {
 		return fmt.Errorf("load terminology: %w", err)
 	}
 
-	// One provider settings store backs both the HTTP handlers and the
-	// translation pipeline resolver, so a saved in-memory API key is
-	// visible everywhere. When the store is not fully configured the
-	// resolver reports ErrNotConfigured and translations fail with
-	// PROVIDER_NOT_CONFIGURED — the mock provider is test-only.
+	// One provider settings store backs the HTTP handlers, the translation
+	// pipeline and the chat service, so a saved in-memory API key is visible
+	// everywhere. When the store is not fully configured the resolver
+	// reports ErrNotConfigured and both flows answer PROVIDER_NOT_CONFIGURED
+	// (translations via the standard envelope, chat via a generation.error
+	// SSE event) — the mock provider is test-only.
 	providerSettings := api.NewProviderSettingsStore(settingsRepo)
 	pipeline, err := translation.NewPipeline(providerSettings, providerSettings.TranslationModel,
 		termsSvc, cacheRepo, historyRepo, settingsRepo)
 	if err != nil {
 		return fmt.Errorf("build pipeline: %w", err)
 	}
+	chatSvc := chat.NewService(chatsRepo, settingsRepo, providerSettings, providerSettings.ChatModel, logger)
 
 	server := api.NewServer(cfg, logger, pipeline, settingsRepo, historyRepo, tabsRepo,
-		vocabularyRepo, termsSvc, providerSettings, providerSettings, db.Ping)
+		vocabularyRepo, termsSvc, chatsRepo, chatSvc, providerSettings, providerSettings, db.Ping)
 
 	listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", cfg.HTTPPort))
 	if err != nil {
