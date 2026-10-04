@@ -29,7 +29,14 @@ const ui = useUiStore()
 const COMMANDS = ['compact', 'clear', 'context', 'export'] as const
 type SlashCommand = (typeof COMMANDS)[number]
 
-const draft = ref('')
+// The composer draft lives in the chats store so Ask AI can prefill it
+// (startAskAi creates a fresh chat and drops the reference text here).
+const draft = computed<string>({
+  get: () => chats.draft,
+  set: (value) => {
+    chats.draft = value
+  },
+})
 const sessionMenuOpen = ref(false)
 const editingChatId = ref<string | null>(null)
 const editingTitle = ref('')

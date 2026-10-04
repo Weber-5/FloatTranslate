@@ -1,7 +1,8 @@
 <script setup lang="ts">
 /**
- * Ask AI: opens the AI Sidebar and sends the current content into the active
- * session as a quoted reference (docs/00 §7 / docs/06 §12).
+ * Ask AI: creates a NEW chat, opens the AI Sidebar and prefills the composer
+ * with the current word/text as a reference (docs/00 §7 / docs/06 §12).
+ * Sending stays user-triggered (real streaming arrives in Phase 4).
  */
 import { useI18n } from 'vue-i18n'
 import { useChatsStore } from '@/stores/chats'
@@ -17,12 +18,12 @@ function onAsk(): void {
   const content = props.text.trim()
   if (content.length === 0) return
   ui.sidebarOpen = true
-  void chats.askAi(content)
+  void chats.startAskAi(content)
 }
 </script>
 
 <template>
-  <button type="button" class="btn btn-ghost ask-ai" @click="onAsk">
+  <button type="button" class="btn btn-ghost ask-ai" data-testid="ask-ai" @click="onAsk">
     {{ t('translate.askAi') }}
   </button>
 </template>

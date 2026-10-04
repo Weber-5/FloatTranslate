@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -87,27 +86,33 @@ type ListParams struct {
 	Cursor string // opaque cursor from the previous page
 }
 
-// cursor is the JSON payload encoded into the opaque cursor string.
+// cursor is the payload encoded into the opaque cursor string (Phase 2
+// freeze): base64url-encoding of `<created_at RFC3339>|<id>` of the LAST
+// item on the previous page. The cursor is opaque to clients.
 type cursor struct {
-	CreatedAt string `json:"created_at"`
-	ID        string `json:"id"`
+	CreatedAt string
+	ID        string
 }
 
 func encodeCursor(c cursor) string {
-	raw, _ := json.Marshal(c)
-	return base64.RawURLEncoding.EncodeToString(raw)
+	return base64.RawURLEncoding.EncodeToString([]byte(c.CreatedAt + "|" + c.ID))
 }
 
 func decodeCursor(s string) (cursor, error) {
-	var c cursor
 	raw, err := base64.RawURLEncoding.DecodeString(s)
 	if err != nil {
-		return c, fmt.Errorf("invalid cursor: %w", err)
+		// Tolerate padded base64url input.
+		var err2 error
+		raw, err2 = base64.URLEncoding.DecodeString(s)
+		if err2 != nil {
+			return cursor{}, fmt.Errorf("%w: %v", ErrInvalidCursor, err)
+		}
 	}
-	if err := json.Unmarshal(raw, &c); err != nil {
-		return c, fmt.Errorf("invalid cursor: %w", err)
+	parts := strings.SplitN(string(raw), "|", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return cursor{}, fmt.Errorf("%w: malformed cursor payload", ErrInvalidCursor)
 	}
-	return c, nil
+	return cursor{CreatedAt: parts[0], ID: parts[1]}, nil
 }
 
 const defaultHistoryLimit = 50

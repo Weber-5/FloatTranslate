@@ -1,7 +1,8 @@
 <script setup lang="ts">
 /**
  * Network settings: proxy mode (system / HTTP / HTTPS / SOCKS5) with custom
- * fields (docs/00 §9). Saves on change.
+ * fields (docs/00 §9). Mode (select) persists immediately; text fields
+ * persist on change with an 800ms debounce (Phase 2 auto-save policy).
  */
 import { computed, reactive, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
@@ -19,24 +20,35 @@ const form = reactive({
   proxy_password: '',
 })
 
+function syncFromApp(): void {
+  const app = settings.app
+  if (!app) return
+  form.proxy_mode = app.proxy_mode ?? 'system'
+  form.proxy_host = app.proxy_host ?? ''
+  form.proxy_port = app.proxy_port ?? 0
+  form.proxy_username = app.proxy_username ?? ''
+  form.proxy_password = app.proxy_password ?? ''
+}
+
+// Sync on (re)load only; background saves never clobber in-progress typing.
 watch(
-  () => settings.app,
-  (app) => {
-    if (!app) return
-    form.proxy_mode = app.proxy_mode ?? 'system'
-    form.proxy_host = app.proxy_host ?? ''
-    form.proxy_port = app.proxy_port ?? 0
-    form.proxy_username = app.proxy_username ?? ''
-    form.proxy_password = app.proxy_password ?? ''
+  () => settings.status,
+  (status) => {
+    if (status === 'success') syncFromApp()
   },
-  { immediate: true, deep: true },
+  { immediate: true },
 )
 
 const isCustom = computed(() => form.proxy_mode !== 'system')
 
-async function persist(): Promise<void> {
-  await settings.saveApp({
+function persistMode(): void {
+  void settings.saveApp({
     proxy_mode: form.proxy_mode,
+  })
+}
+
+function persistFieldsDebounced(): void {
+  settings.saveAppDebounced({
     proxy_host: form.proxy_host.trim(),
     proxy_port: Number(form.proxy_port) || 0,
     proxy_username: form.proxy_username,
@@ -56,7 +68,7 @@ async function persist(): Promise<void> {
           type="radio"
           name="proxy-mode"
           :value="mode"
-          @change="persist"
+          @change="persistMode"
         />
         <span>{{
           mode === 'system'
@@ -73,19 +85,19 @@ async function persist(): Promise<void> {
     <div v-if="isCustom" class="proxy-fields">
       <label class="field">
         <span class="field-label">{{ t('settings.network.host') }}</span>
-        <input v-model="form.proxy_host" type="text" class="input" @change="persist" />
+        <input v-model="form.proxy_host" type="text" class="input" @change="persistFieldsDebounced" />
       </label>
       <label class="field">
         <span class="field-label">{{ t('settings.network.port') }}</span>
-        <input v-model.number="form.proxy_port" type="number" min="0" class="input" @change="persist" />
+        <input v-model.number="form.proxy_port" type="number" min="0" class="input" @change="persistFieldsDebounced" />
       </label>
       <label class="field">
         <span class="field-label">{{ t('settings.network.username') }}</span>
-        <input v-model="form.proxy_username" type="text" class="input" autocomplete="off" @change="persist" />
+        <input v-model="form.proxy_username" type="text" class="input" autocomplete="off" @change="persistFieldsDebounced" />
       </label>
       <label class="field">
         <span class="field-label">{{ t('settings.network.password') }}</span>
-        <input v-model="form.proxy_password" type="password" class="input" autocomplete="new-password" @change="persist" />
+        <input v-model="form.proxy_password" type="password" class="input" autocomplete="new-password" @change="persistFieldsDebounced" />
       </label>
     </div>
   </div>

@@ -21,16 +21,23 @@ type Server struct {
 	settings         *repository.SettingsRepo
 	history          *repository.HistoryRepo
 	tabs             *repository.TabsRepo
+	vocabulary       *repository.VocabularyRepo
 	terms            *terminology.Service
-	provider         llm.Provider
+	resolver         llm.Resolver
 	providerSettings *ProviderSettingsStore
 	ping             func() error
 }
 
-// NewServer builds the API server. ping reports database health for /health.
+// NewServer builds the API server. providerSettings holds the provider
+// configuration + in-memory API key; it MUST be the same instance the
+// pipeline was built with so a saved key is visible to the translation
+// flow. resolver supplies the provider per request (the providerSettings
+// store in production wiring; the mock only as a test fixture). ping
+// reports database health for /health.
 func NewServer(cfg config.Config, logger *slog.Logger, pipeline *translation.Pipeline,
 	settings *repository.SettingsRepo, history *repository.HistoryRepo, tabs *repository.TabsRepo,
-	terms *terminology.Service, provider llm.Provider, ping func() error) *Server {
+	vocabulary *repository.VocabularyRepo, terms *terminology.Service,
+	providerSettings *ProviderSettingsStore, resolver llm.Resolver, ping func() error) *Server {
 	return &Server{
 		cfg:              cfg,
 		logger:           logger,
@@ -38,9 +45,10 @@ func NewServer(cfg config.Config, logger *slog.Logger, pipeline *translation.Pip
 		settings:         settings,
 		history:          history,
 		tabs:             tabs,
+		vocabulary:       vocabulary,
 		terms:            terms,
-		provider:         provider,
-		providerSettings: NewProviderSettingsStore(settings),
+		resolver:         resolver,
+		providerSettings: providerSettings,
 		ping:             ping,
 	}
 }
@@ -74,6 +82,10 @@ func (s *Server) Handler() http.Handler {
 		r.Get("/history", s.ListHistory)
 		r.Delete("/history", s.ClearHistory)
 		r.Delete("/history/{id}", s.DeleteHistoryItem)
+
+		r.Get("/vocabulary", s.ListVocabulary)
+		r.Put("/vocabulary/{lemma}", s.SaveVocabulary)
+		r.Delete("/vocabulary/{lemma}", s.DeleteVocabulary)
 
 		r.Get("/terminology", s.ListTerminology)
 		r.Post("/terminology", s.CreateTerminology)

@@ -143,6 +143,10 @@ export interface HistoryItem {
   kind: TranslationKind
   input_text: string
   result: TranslationResult
+  /** Present since the Phase 2 contract: where the stored result came from. */
+  source?: TranslationSource
+  /** Present since the Phase 2 contract: model that produced the result. */
+  model?: string
   created_at: string
 }
 

@@ -40,11 +40,19 @@ watch(
 
 const configured = computed(() => settings.provider?.api_key_configured ?? false)
 
+// The password input always starts empty (write-only key). The placeholder
+// reflects the configured state without ever revealing stored material.
 const keyPlaceholder = computed(() =>
   configured.value
-    ? `${t('settings.provider.apiKeyConfiguredPrefix')}（${settings.provider?.api_key_hint ?? ''}）`
-    : t('settings.provider.apiKeyPlaceholder'),
+    ? t('settings.provider.apiKeyConfiguredPlaceholder')
+    : t('settings.provider.apiKeyEmptyPlaceholder'),
 )
+
+const keyHint = computed(() => {
+  const hint = settings.provider?.api_key_hint ?? ''
+  const masked = hint.length > 0 ? `（${hint}）` : ''
+  return `${t('settings.provider.apiKeySaveHint')}${masked}`
+})
 
 async function save(): Promise<void> {
   const key = apiKeyInput.value.trim()
@@ -64,13 +72,21 @@ async function save(): Promise<void> {
   }, 2500)
 }
 
+/** Test the CURRENT form values (backend tests the submitted config). */
 async function testConnection(): Promise<void> {
-  await settings.testConnection()
+  const key = apiKeyInput.value.trim()
+  await settings.testConnection({
+    mode: form.mode,
+    base_url: form.base_url.trim(),
+    translation_model: form.translation_model.trim(),
+    chat_model: form.chat_model.trim(),
+    ...(key.length > 0 ? { api_key: key } : {}),
+  })
 }
 </script>
 
 <template>
-  <div class="settings-section card">
+  <div id="settings-provider" class="settings-section card">
     <h2 class="section-title">{{ t('settings.section.provider') }}</h2>
 
     <div class="form-grid">
@@ -109,7 +125,9 @@ async function testConnection(): Promise<void> {
             <IconEye v-else :size="15" />
           </IconButton>
         </span>
-        <span class="field-hint">{{ t('settings.provider.apiKeySaveHint') }}</span>
+        <span class="field-hint">
+          {{ keyHint }}
+        </span>
       </label>
 
       <label class="field">

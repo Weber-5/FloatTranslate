@@ -26,6 +26,8 @@ export const useChatsStore = defineStore('chats', () => {
   const generationError = ref<string | null>(null)
   const streamingMessage = ref<ChatMessage | null>(null)
   const thinkingEnabled = ref(false)
+  /** Composer draft, shared with the sidebar so Ask AI can prefill it. */
+  const draft = ref('')
 
   const activeChat = computed<Chat | null>(
     () => chats.value.find((chat) => chat.id === activeChatId.value) ?? null,
@@ -204,6 +206,18 @@ export const useChatsStore = defineStore('chats', () => {
     await send(referenceText, { referenceText })
   }
 
+  /**
+   * Ask AI (Phase 2 contract, docs/06 §12): create a NEW chat, open the
+   * sidebar and prefill the composer with the word/text as a reference.
+   * Sending stays user-triggered (real streaming arrives in Phase 4).
+   */
+  async function startAskAi(referenceText: string): Promise<void> {
+    const content = referenceText.trim()
+    if (content.length === 0) return
+    await newChat()
+    draft.value = content
+  }
+
   async function saveConversationContext(content: string): Promise<void> {
     const chat = await ensureChat()
     await useApi().putConversationContext(chat.id, { content })
@@ -223,6 +237,7 @@ export const useChatsStore = defineStore('chats', () => {
     generationStatus.value = 'idle'
     generationError.value = null
     streamingMessage.value = null
+    draft.value = ''
     activeHandle = null
   }
 
@@ -235,6 +250,7 @@ export const useChatsStore = defineStore('chats', () => {
     generationError,
     streamingMessage,
     thinkingEnabled,
+    draft,
     activeChat,
     activeMessages,
     isGenerating,
@@ -247,6 +263,7 @@ export const useChatsStore = defineStore('chats', () => {
     send,
     stop,
     askAi,
+    startAskAi,
     saveConversationContext,
     loadConversationContext,
     resetLocalState,

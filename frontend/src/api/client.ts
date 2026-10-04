@@ -49,10 +49,35 @@ export class ApiError extends Error {
   }
 }
 
+/** Error shown when the local sidecar cannot be reached at all (backend down). */
+export const BACKEND_UNAVAILABLE = 'BACKEND_UNAVAILABLE'
+export const BACKEND_UNAVAILABLE_MESSAGE = '无法连接本地服务，请稍后重试'
+
 export function toApiError(err: unknown): ApiError {
   if (err instanceof ApiError) return err
   const message = err instanceof Error ? err.message : String(err)
   return new ApiError('TRANSLATION_FAILED', message, true)
+}
+
+/**
+ * No-auth readiness probe (docs/04 §1: `/health` 可不鉴权).
+ * /health lives at the host root, OUTSIDE /api/v1, so a configured base_url
+ * ending in /api/v1 is stripped first. Never sends the bearer token.
+ */
+export async function probeBackendHealth(baseUrl: string, timeoutMs = 5000): Promise<boolean> {
+  const base = baseUrl
+    .replace(/\/+$/, '')
+    .replace(/\/api\/v1$/, '')
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const response = await fetch(`${base}/health`, { signal: controller.signal })
+    return response.ok
+  } catch {
+    return false
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 export interface ChatGenerationHandlers {
@@ -76,7 +101,11 @@ export interface ApiClient {
   updateSettings(settings: AppSettings): Promise<void>
   getProviderSettings(): Promise<ProviderSettingsView>
   updateProviderSettings(update: ProviderSettingsUpdate): Promise<void>
-  testProviderConnection(): Promise<ProviderTestResult>
+  /**
+   * Tests the SUBMITTED config (docs/04 §4): the current form values travel in
+   * the body — the backend tests them, not only the previously saved ones.
+   */
+  testProviderConnection(update: ProviderSettingsUpdate): Promise<ProviderTestResult>
 
   // Translation
   createTranslation(
@@ -150,30 +179,38 @@ export function createRealClient(config: BackendConfig): ApiClient {
           ...(init?.headers ?? {}),
         },
       })
-    } catch (err) {
-      throw new ApiError('PROVIDER_CONNECTION_FAILED', `无法连接本地后端：${String(err)}`, true)
+    } catch {
+      // Backend down / sidecar not ready: uniform typed error for the stores.
+      throw new ApiError(BACKEND_UNAVAILABLE, BACKEND_UNAVAILABLE_MESSAGE, true)
     }
 
     if (response.status === 204) return undefined as T
 
     const text = await response.text()
     let body: unknown = undefined
+    let isJson = false
     if (text.length > 0) {
       try {
         body = JSON.parse(text)
+        isJson = true
       } catch {
         body = undefined
+        isJson = false
       }
     }
 
     if (!response.ok) {
-      const errBody = (body as ErrorResponse | undefined)?.error
-      throw new ApiError(
-        errBody?.code ?? 'PROVIDER_UNAVAILABLE',
-        errBody?.message ?? `请求失败（HTTP ${response.status}）`,
-        errBody?.retryable ?? response.status >= 500,
-        errBody?.details,
-      )
+      const errBody = isJson ? (body as ErrorResponse | undefined)?.error : undefined
+      if (errBody?.code) {
+        throw new ApiError(
+          errBody.code,
+          errBody.message,
+          errBody.retryable ?? response.status >= 500,
+          errBody.details,
+        )
+      }
+      // Non-JSON failure (proxy error page / crashed process) → backend down.
+      throw new ApiError(BACKEND_UNAVAILABLE, BACKEND_UNAVAILABLE_MESSAGE, true)
     }
 
     return body as T
@@ -202,8 +239,17 @@ export function createRealClient(config: BackendConfig): ApiClient {
       await request<void>('/settings/provider', { method: 'PUT', body: json(update) })
     },
 
-    async testProviderConnection() {
-      return request<ProviderTestResult>('/settings/provider/test', { method: 'POST' })
+    async testProviderConnection(update: ProviderSettingsUpdate) {
+      return request<ProviderTestResult>('/settings/provider/test', {
+        method: 'POST',
+        body: json({
+          mode: update.mode,
+          base_url: update.base_url,
+          translation_model: update.translation_model,
+          chat_model: update.chat_model,
+          ...(update.api_key && update.api_key.trim().length > 0 ? { api_key: update.api_key } : {}),
+        }),
+      })
     },
 
     async createTranslation(text, forceKind, bypassCache) {

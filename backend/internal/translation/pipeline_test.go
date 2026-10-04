@@ -8,13 +8,16 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/Weber-5/FloatTranslate/backend/internal/apperr"
 	"github.com/Weber-5/FloatTranslate/backend/internal/database"
 	"github.com/Weber-5/FloatTranslate/backend/internal/dto"
+	"github.com/Weber-5/FloatTranslate/backend/internal/llm"
 	"github.com/Weber-5/FloatTranslate/backend/internal/migration"
 	"github.com/Weber-5/FloatTranslate/backend/internal/nlp"
+	"github.com/Weber-5/FloatTranslate/backend/internal/protectedspan"
 	"github.com/Weber-5/FloatTranslate/backend/internal/repository"
 	"github.com/Weber-5/FloatTranslate/backend/internal/terminology"
 )
@@ -26,6 +29,7 @@ type harness struct {
 	cache    *repository.CacheRepo
 	history  *repository.HistoryRepo
 	terms    *terminology.Service
+	settings *repository.SettingsRepo
 }
 
 func newHarness(t *testing.T) *harness {
@@ -40,17 +44,19 @@ func newHarness(t *testing.T) *harness {
 	}
 	cache := repository.NewCacheRepo(db)
 	history := repository.NewHistoryRepo(db)
+	settings := repository.NewSettingsRepo(db)
 	terms, err := terminology.NewService(context.Background(), repository.NewTerminologyRepo(db))
 	if err != nil {
 		t.Fatalf("terminology service: %v", err)
 	}
 	provider := NewMockProvider()
-	pipeline, err := NewPipeline(provider, func() string { return DefaultTranslationModel },
-		terms, cache, history)
+	pipeline, err := NewPipeline(llm.FixedResolver{P: provider}, func() string { return DefaultTranslationModel },
+		terms, cache, history, settings)
 	if err != nil {
 		t.Fatalf("pipeline: %v", err)
 	}
-	return &harness{pipeline: pipeline, provider: provider, db: db, cache: cache, history: history, terms: terms}
+	return &harness{pipeline: pipeline, provider: provider, db: db, cache: cache,
+		history: history, terms: terms, settings: settings}
 }
 
 func code(t *testing.T, err error) (apperr.Code, bool) {
@@ -340,5 +346,395 @@ func TestResultJSONRoundTripsThroughCache(t *testing.T) {
 	}
 	if stored.Lemma != "suspend" {
 		t.Errorf("cached lemma = %q", stored.Lemma)
+	}
+}
+
+// --- Phase 2: scripted provider, protected spans, terminology, resolver ---
+
+// scriptStep is one scripted provider response.
+type scriptStep struct {
+	content string
+	err     error
+}
+
+// scriptProvider plays back a scripted sequence of responses and records the
+// requests it received. When the script is exhausted it repeats the last
+// step; with no script it fails.
+type scriptProvider struct {
+	mu    sync.Mutex
+	steps []scriptStep
+	i     int
+	reqs  []llm.CompleteRequest
+}
+
+func newScriptProvider(steps ...scriptStep) *scriptProvider {
+	return &scriptProvider{steps: steps}
+}
+
+func (s *scriptProvider) Complete(_ context.Context, req llm.CompleteRequest) (llm.CompleteResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reqs = append(s.reqs, req)
+	if len(s.steps) == 0 {
+		return llm.CompleteResponse{}, llm.ErrUnavailable
+	}
+	i := s.i
+	if i >= len(s.steps) {
+		i = len(s.steps) - 1
+	}
+	s.i++
+	step := s.steps[i]
+	if step.err != nil {
+		return llm.CompleteResponse{}, step.err
+	}
+	return llm.CompleteResponse{Content: step.content}, nil
+}
+
+func (s *scriptProvider) Capabilities() llm.Capabilities {
+	return llm.Capabilities{SupportsThinking: true, SupportsStructuredOutput: true}
+}
+
+func (s *scriptProvider) callCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.reqs)
+}
+
+func (s *scriptProvider) requests() []llm.CompleteRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]llm.CompleteRequest, len(s.reqs))
+	copy(out, s.reqs)
+	return out
+}
+
+// textPayload builds a schema-valid TextTranslation payload.
+func textPayload(sourceMarkdown, translatedMarkdown string, segmentTranslations ...string) string {
+	segments := make([]dto.Segment, 0, len(segmentTranslations))
+	for _, tr := range segmentTranslations {
+		segments = append(segments, dto.Segment{Source: sourceMarkdown, Translation: tr})
+	}
+	raw, err := json.Marshal(dto.TextTranslation{
+		SourceMarkdown:     sourceMarkdown,
+		TranslatedMarkdown: translatedMarkdown,
+		Segments:           segments,
+	})
+	if err != nil {
+		panic(err)
+	}
+	return string(raw)
+}
+
+// wordPayload builds a schema-valid WordTranslation payload.
+func wordPayload(word string) string {
+	raw, err := json.Marshal(dto.WordTranslation{
+		Word:       word,
+		Lemma:      word,
+		PhoneticUK: "/wɜːd/",
+		PhoneticUS: "/wɝːd/",
+		PartsOfSpeech: []dto.PartOfSpeech{
+			{Part: "noun", Meanings: []string{"测试释义"}},
+		},
+		Synonyms:    []string{"sample"},
+		Inflections: []string{word + "s"},
+	})
+	if err != nil {
+		panic(err)
+	}
+	return string(raw)
+}
+
+func newScriptHarness(t *testing.T, provider llm.Provider) *harness {
+	t.Helper()
+	h := newHarness(t)
+	p, err := NewPipeline(llm.FixedResolver{P: provider}, func() string { return DefaultTranslationModel },
+		h.terms, h.cache, h.history, h.settings)
+	if err != nil {
+		t.Fatalf("pipeline: %v", err)
+	}
+	h.pipeline = p
+	return h
+}
+
+const spanInput = "Check `config.yaml` and visit https://example.com/docs.\n\n" +
+	"```go\nfmt.Println(42)\n```\n\nUse C:\\data\\cache please. Version 2.5 shipped."
+
+func TestProtectedSpansMaskedAndRestoredVerbatim(t *testing.T) {
+	masked := protectedspan.Mask(spanInput)
+	if len(masked.Spans) < 4 {
+		t.Fatalf("expected several protected spans, got %d: %+v", len(masked.Spans), masked.Spans)
+	}
+	// Script a payload that echoes the placeholders back like a compliant
+	// model would.
+	md := masked.Text
+	provider := newScriptProvider(scriptStep{content: textPayload(md, "译文：\n\n"+md, "译文：\n\n"+md)})
+	h := newScriptHarness(t, provider)
+
+	resp, err := h.pipeline.Translate(context.Background(),
+		dto.TranslationRequest{Text: spanInput, ForceKind: nlp.KindText}, Options{})
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	reqs := provider.requests()
+	if len(reqs) == 0 {
+		t.Fatal("no provider requests recorded")
+	}
+	if strings.Contains(reqs[0].Prompt, "https://example.com/docs") ||
+		strings.Contains(reqs[0].Prompt, "fmt.Println(42)") {
+		t.Errorf("provider prompt contained unprotected content: %q", reqs[0].Prompt)
+	}
+	if !strings.Contains(reqs[0].Prompt, masked.Spans[0].Placeholder) {
+		t.Errorf("provider prompt missing placeholders: %q", reqs[0].Prompt)
+	}
+	// The restored result must contain every protected snippet verbatim.
+	result := resp.Result.(map[string]any)
+	out := result["translated_markdown"].(string)
+	for _, want := range []string{"`config.yaml`", "https://example.com/docs",
+		"fmt.Println(42)", `C:\data\cache`, "2.5"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("restored translation missing %q in %q", want, out)
+		}
+	}
+	if strings.Contains(out, protectedspan.PlaceholderPrefix) {
+		t.Errorf("placeholder leaked into result: %q", out)
+	}
+	// The system prompt must carry the frozen rules.
+	if !strings.Contains(reqs[0].SystemPrompt, "仅将英文翻译为简体中文") ||
+		!strings.Contains(reqs[0].SystemPrompt, "术语表是硬约束") ||
+		!strings.Contains(reqs[0].SystemPrompt, "占位符") {
+		t.Errorf("system prompt missing frozen rules: %q", reqs[0].SystemPrompt)
+	}
+}
+
+func TestPlaceholderLossTriggersRepair(t *testing.T) {
+	masked := protectedspan.Mask(spanInput)
+	lostMD := strings.ReplaceAll(masked.Text, masked.Spans[0].Placeholder, "")
+	lostMD = strings.ReplaceAll(lostMD, masked.Spans[1].Placeholder, "")
+	fixed := masked.Text
+
+	provider := newScriptProvider(
+		scriptStep{content: textPayload("src", lostMD, lostMD)},
+		scriptStep{content: textPayload("src", "译文 "+fixed, "译文 "+fixed)},
+	)
+	h := newScriptHarness(t, provider)
+	resp, err := h.pipeline.Translate(context.Background(),
+		dto.TranslationRequest{Text: spanInput, ForceKind: nlp.KindText}, Options{})
+	if err != nil {
+		t.Fatalf("repair after placeholder loss should succeed: %v", err)
+	}
+	if provider.callCount() != 2 {
+		t.Errorf("calls = %d, want 2 (original + span repair)", provider.callCount())
+	}
+	out := resp.Result.(map[string]any)["translated_markdown"].(string)
+	if !strings.Contains(out, masked.Spans[0].Content) {
+		t.Errorf("repaired result missing restored content: %q", out)
+	}
+}
+
+func TestPlaceholderLossAfterRepairFails(t *testing.T) {
+	masked := protectedspan.Mask(spanInput)
+	lostMD := strings.ReplaceAll(masked.Text, masked.Spans[0].Placeholder, "")
+
+	provider := newScriptProvider(
+		scriptStep{content: textPayload("src", lostMD, lostMD)},
+		scriptStep{content: textPayload("src", lostMD, lostMD)}, // repair also loses it
+	)
+	h := newScriptHarness(t, provider)
+	_, err := h.pipeline.Translate(context.Background(),
+		dto.TranslationRequest{Text: spanInput, ForceKind: nlp.KindText}, Options{})
+	if err == nil {
+		t.Fatal("expected TRANSLATION_FAILED after failed span repair")
+	}
+	e := apperr.AsE(err)
+	if e.Code != apperr.CodeTranslationFailed || e.Retryable {
+		t.Errorf("code = %s retryable = %v, want TRANSLATION_FAILED non-retryable", e.Code, e.Retryable)
+	}
+	if e.Details["reason"] != "protected_span_lost" {
+		t.Errorf("details.reason = %v, want protected_span_lost", e.Details["reason"])
+	}
+	if provider.callCount() != 2 {
+		t.Errorf("calls = %d, want 2 (exactly one repair attempt)", provider.callCount())
+	}
+}
+
+func TestTerminologySatisfiedNeedsNoRepair(t *testing.T) {
+	h := newHarness(t)
+	if _, err := h.terms.Create(context.Background(), "API", "接口"); err != nil {
+		t.Fatalf("create term: %v", err)
+	}
+	provider := newScriptProvider(scriptStep{content: textPayload("src", "该接口很快。", "该接口很快。")})
+	p, err := NewPipeline(llm.FixedResolver{P: provider}, func() string { return DefaultTranslationModel },
+		h.terms, h.cache, h.history, h.settings)
+	if err != nil {
+		t.Fatalf("pipeline: %v", err)
+	}
+	if _, err := p.Translate(context.Background(),
+		dto.TranslationRequest{Text: "The API is fast", ForceKind: nlp.KindText}, Options{}); err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	if provider.callCount() != 1 {
+		t.Errorf("calls = %d, want 1 (no repair)", provider.callCount())
+	}
+}
+
+func TestTerminologyViolationRepaired(t *testing.T) {
+	h := newHarness(t)
+	if _, err := h.terms.Create(context.Background(), "API", "接口"); err != nil {
+		t.Fatalf("create term: %v", err)
+	}
+	provider := newScriptProvider(
+		scriptStep{content: textPayload("src", "The API is fast.", "The API is fast.")},
+		scriptStep{content: textPayload("src", "该接口很快。", "该接口很快。")},
+	)
+	p, err := NewPipeline(llm.FixedResolver{P: provider}, func() string { return DefaultTranslationModel },
+		h.terms, h.cache, h.history, h.settings)
+	if err != nil {
+		t.Fatalf("pipeline: %v", err)
+	}
+	resp, err := p.Translate(context.Background(),
+		dto.TranslationRequest{Text: "The API is fast", ForceKind: nlp.KindText}, Options{})
+	if err != nil {
+		t.Fatalf("terminology repair should succeed: %v", err)
+	}
+	if provider.callCount() != 2 {
+		t.Errorf("calls = %d, want 2 (original + terminology repair)", provider.callCount())
+	}
+	// The repair prompt must name the violated term explicitly.
+	reqs := provider.requests()
+	if !strings.Contains(reqs[1].Prompt, "API") || !strings.Contains(reqs[1].Prompt, "接口") {
+		t.Errorf("repair prompt missing violated terms: %q", reqs[1].Prompt)
+	}
+	out := resp.Result.(map[string]any)["translated_markdown"].(string)
+	if strings.Contains(out, "API") {
+		t.Errorf("violating term survived: %q", out)
+	}
+}
+
+func TestTerminologyViolationAfterRepairFails(t *testing.T) {
+	h := newHarness(t)
+	if _, err := h.terms.Create(context.Background(), "API", "接口"); err != nil {
+		t.Fatalf("create term: %v", err)
+	}
+	provider := newScriptProvider(
+		scriptStep{content: textPayload("src", "The API is fast.", "The API is fast.")},
+		scriptStep{content: textPayload("src", "The API is fast.", "The API is fast.")},
+	)
+	p, err := NewPipeline(llm.FixedResolver{P: provider}, func() string { return DefaultTranslationModel },
+		h.terms, h.cache, h.history, h.settings)
+	if err != nil {
+		t.Fatalf("pipeline: %v", err)
+	}
+	_, err = p.Translate(context.Background(),
+		dto.TranslationRequest{Text: "The API is fast", ForceKind: nlp.KindText}, Options{})
+	if err == nil {
+		t.Fatal("expected TRANSLATION_FAILED")
+	}
+	e := apperr.AsE(err)
+	if e.Code != apperr.CodeTranslationFailed || e.Retryable {
+		t.Errorf("code = %s retryable = %v", e.Code, e.Retryable)
+	}
+	if e.Details["reason"] != "terminology_violation" {
+		t.Errorf("details.reason = %v", e.Details["reason"])
+	}
+	violated, ok := e.Details["violated"].([]string)
+	if !ok || len(violated) == 0 || !strings.Contains(violated[0], "API") {
+		t.Errorf("details.violated missing: %v", e.Details)
+	}
+}
+
+// switchResolver lets tests swap the provider resolver at runtime.
+type switchResolver struct {
+	mu sync.Mutex
+	r  llm.Resolver
+}
+
+func (s *switchResolver) set(r llm.Resolver) {
+	s.mu.Lock()
+	s.r = r
+	s.mu.Unlock()
+}
+
+func (s *switchResolver) TranslationProvider(ctx context.Context) (llm.Provider, error) {
+	s.mu.Lock()
+	r := s.r
+	s.mu.Unlock()
+	return r.TranslationProvider(ctx)
+}
+
+func TestProviderNotConfiguredAndCacheInteraction(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	sw := &switchResolver{r: llm.FixedResolver{P: h.provider}}
+	p, err := NewPipeline(sw, func() string { return DefaultTranslationModel },
+		h.terms, h.cache, h.history, h.settings)
+	if err != nil {
+		t.Fatalf("pipeline: %v", err)
+	}
+	// Prime the cache while configured.
+	if _, err := p.Translate(ctx, dto.TranslationRequest{Text: "suspended"}, Options{}); err != nil {
+		t.Fatalf("prime: %v", err)
+	}
+
+	// Cache hit is still served when the provider later becomes unconfigured.
+	sw.set(llm.NotConfiguredResolver{})
+	resp, err := p.Translate(ctx, dto.TranslationRequest{Text: "suspended"}, Options{})
+	if err != nil {
+		t.Fatalf("cache hit without provider should work: %v", err)
+	}
+	if resp.Source != SourceCache {
+		t.Errorf("source = %s, want cache", resp.Source)
+	}
+
+	// Cache miss (bypass) → PROVIDER_NOT_CONFIGURED, non-retryable.
+	_, err = p.Translate(ctx, dto.TranslationRequest{Text: "brand new phrase", BypassCache: true}, Options{})
+	if err == nil {
+		t.Fatal("expected PROVIDER_NOT_CONFIGURED")
+	}
+	e := apperr.AsE(err)
+	if e.Code != apperr.CodeProviderNotConfigured || e.Retryable {
+		t.Errorf("code = %s retryable = %v", e.Code, e.Retryable)
+	}
+	if h.provider.Calls() != 1 {
+		t.Errorf("mock must not be consulted, calls=%d", h.provider.Calls())
+	}
+}
+
+func TestCustomTranslationPromptAppendedAsPreference(t *testing.T) {
+	h := newHarness(t)
+	if err := h.settings.Put(context.Background(), "custom_translation_prompt", `"取正式语气"`); err != nil {
+		t.Fatalf("put setting: %v", err)
+	}
+	provider := newScriptProvider(scriptStep{content: wordPayload("suspended")})
+	p, err := NewPipeline(llm.FixedResolver{P: provider}, func() string { return DefaultTranslationModel },
+		h.terms, h.cache, h.history, h.settings)
+	if err != nil {
+		t.Fatalf("pipeline: %v", err)
+	}
+	if _, err := p.Translate(context.Background(), dto.TranslationRequest{Text: "suspended"}, Options{}); err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	reqs := provider.requests()
+	if !strings.Contains(reqs[0].SystemPrompt, "取正式语气") {
+		t.Errorf("custom prompt missing from system prompt: %q", reqs[0].SystemPrompt)
+	}
+	if !strings.Contains(reqs[0].SystemPrompt, "偏好") {
+		t.Errorf("custom prompt must be marked preference-only: %q", reqs[0].SystemPrompt)
+	}
+}
+
+func TestWordKindProtectedNumberRestored(t *testing.T) {
+	// force_kind=word on an alphanumeric token: the masked input carries a
+	// placeholder and the word payload must still pass the full chain.
+	masked := protectedspan.Mask("COVID19")
+	provider := newScriptProvider(scriptStep{content: wordPayload(masked.Text)})
+	h := newScriptHarness(t, provider)
+	resp, err := h.pipeline.Translate(context.Background(),
+		dto.TranslationRequest{Text: "COVID19", ForceKind: nlp.KindWord}, Options{})
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	word := resp.Result.(map[string]any)
+	if word["word"] != "COVID19" {
+		t.Errorf("word = %v, want COVID19 restored", word["word"])
 	}
 }

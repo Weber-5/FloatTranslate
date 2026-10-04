@@ -54,12 +54,15 @@ type TranslationResponse struct {
 	CreatedAt     string `json:"created_at"` // RFC3339 UTC
 }
 
-// HistoryItem mirrors components.schemas.HistoryItem.
+// HistoryItem mirrors components.schemas.HistoryItem. Source and Model are
+// optional per the contract but always populated by the server.
 type HistoryItem struct {
 	ID        string `json:"id"`
 	Kind      string `json:"kind"`
 	InputText string `json:"input_text"`
 	Result    any    `json:"result"`
+	Source    string `json:"source,omitempty"` // model | cache
+	Model     string `json:"model,omitempty"`
 	CreatedAt string `json:"created_at"`
 }
 

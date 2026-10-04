@@ -91,8 +91,8 @@ function setKindFilter(kind: 'all' | TranslationKind): void {
 }
 
 function open(item: HistoryItem): void {
-  translationStore.openHistoryItem(item)
   ui.historyOpen = false
+  void translationStore.openHistoryItem(item)
 }
 
 function askDelete(item: HistoryItem): void {
@@ -197,8 +197,18 @@ function formatTime(iso: string): string {
                 <li v-for="item in items" :key="item.id" class="history-row">
                   <button type="button" class="history-item" @click="open(item)">
                     <span class="history-top">
-                      <span class="badge" :class="{ 'badge-accent': item.kind === 'word' }">
-                        {{ item.kind === 'word' ? t('history.filterWord') : t('history.filterText') }}
+                      <span class="history-badges">
+                        <span class="badge" :class="{ 'badge-accent': item.kind === 'word' }">
+                          {{ item.kind === 'word' ? t('history.filterWord') : t('history.filterText') }}
+                        </span>
+                        <span
+                          v-if="item.source"
+                          class="badge"
+                          :class="{ 'badge-warning': item.source === 'cache' }"
+                          data-testid="history-source-badge"
+                        >
+                          {{ item.source === 'cache' ? t('history.sourceCache') : t('history.sourceModel') }}
+                        </span>
                       </span>
                       <span class="history-time">{{ formatTime(item.created_at) }}</span>
                     </span>
@@ -403,6 +413,12 @@ function formatTime(iso: string): string {
   justify-content: space-between;
   width: 100%;
   gap: var(--space-2);
+}
+
+.history-badges {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
 }
 
 .history-time {

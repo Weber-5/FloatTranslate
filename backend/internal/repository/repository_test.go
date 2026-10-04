@@ -3,6 +3,8 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -84,6 +86,29 @@ func TestHistoryCRUDAndCursorPagination(t *testing.T) {
 		t.Fatalf("page3 rows=%d next=%q", len(rows), next)
 	}
 
+	// Invalid cursor surfaces ErrInvalidCursor (mapped to 400 upstream).
+	if _, _, err = repo.List(ctx, ListParams{Limit: 2, Cursor: "not-a-cursor"}); err == nil || !errors.Is(err, ErrInvalidCursor) {
+		t.Errorf("invalid cursor should be ErrInvalidCursor, got %v", err)
+	}
+	if _, _, err = repo.List(ctx, ListParams{Cursor: base64.RawURLEncoding.EncodeToString([]byte("no-separator"))}); !errors.Is(err, ErrInvalidCursor) {
+		t.Errorf("cursor payload without | should be ErrInvalidCursor, got %v", err)
+	}
+
+	// Cursor format (Phase 2 freeze): base64url of `<created_at>|<id>` of
+	// the last item on the page.
+	rows, next, err = repo.List(ctx, ListParams{Limit: 2})
+	if err != nil || next == "" {
+		t.Fatalf("cursor format list: %v next=%q", err, next)
+	}
+	raw, derr := base64.RawURLEncoding.DecodeString(next)
+	if derr != nil {
+		t.Fatalf("next_cursor is not base64url: %v", derr)
+	}
+	wantPayload := rows[1].CreatedAt + "|" + rows[1].ID
+	if string(raw) != wantPayload {
+		t.Errorf("cursor payload = %q, want %q", raw, wantPayload)
+	}
+
 	// Kind filter.
 	rows, _, err = repo.List(ctx, ListParams{Kind: "text"})
 	if err != nil {
@@ -149,8 +174,10 @@ func TestVocabularyDedupeByLemmaNOCASE(t *testing.T) {
 	if err := repo.Upsert(ctx, first); err != nil {
 		t.Fatalf("upsert 1: %v", err)
 	}
-	// Same lemma, different case, later last_viewed_at: dedupe, refresh view.
-	second := VocabularyRow{Lemma: "run", WordJSON: `{"word":"run"}`, SavedAt: viewedAt, LastViewedAt: viewedAt}
+	// Same lemma, different case, later last_viewed_at: dedupe, refresh
+	// view, update word_json (Phase 2 freeze), keep saved_at.
+	second := VocabularyRow{Lemma: "run", WordJSON: `{"word":"run","parts_of_speech":[{"part":"verb","meanings":["跑"]}]}`,
+		SavedAt: viewedAt, LastViewedAt: viewedAt}
 	if err := repo.Upsert(ctx, second); err != nil {
 		t.Fatalf("upsert 2: %v", err)
 	}
@@ -168,6 +195,12 @@ func TestVocabularyDedupeByLemmaNOCASE(t *testing.T) {
 	if rows[0].LastViewedAt != viewedAt {
 		t.Errorf("last_viewed_at not refreshed: %s", rows[0].LastViewedAt)
 	}
+	if rows[0].WordJSON != second.WordJSON {
+		t.Errorf("word_json not updated on re-save: %s", rows[0].WordJSON)
+	}
+	if rows[0].Lemma != "Run" {
+		t.Errorf("original lemma spelling must be kept: %q", rows[0].Lemma)
+	}
 
 	got, err := repo.Get(ctx, "RUN")
 	if err != nil {
@@ -182,6 +215,51 @@ func TestVocabularyDedupeByLemmaNOCASE(t *testing.T) {
 	}
 	if _, err := repo.Get(ctx, "Run"); err != ErrNotFound {
 		t.Errorf("expected ErrNotFound after delete, got %v", err)
+	}
+	if err := repo.Delete(ctx, "run"); err != ErrNotFound {
+		t.Errorf("deleting unknown lemma should be ErrNotFound, got %v", err)
+	}
+}
+
+func TestVocabularyQueryFiltersWordLemmaMeanings(t *testing.T) {
+	db := newRepoDB(t)
+	repo := NewVocabularyRepo(db)
+	ctx := context.Background()
+
+	rows := []VocabularyRow{
+		{Lemma: "run", WordJSON: `{"word":"run","parts_of_speech":[{"part":"verb","meanings":["跑","奔跑"]}]}`, SavedAt: ts(0), LastViewedAt: ts(0)},
+		{Lemma: "walk", WordJSON: `{"word":"walk","parts_of_speech":[{"part":"verb","meanings":["步行"]}]}`, SavedAt: ts(1), LastViewedAt: ts(1)},
+		{Lemma: "graceful", WordJSON: `{"word":"graceful","parts_of_speech":[{"part":"adj","meanings":["优雅的"]}]}`, SavedAt: ts(2), LastViewedAt: ts(2)},
+	}
+	for _, row := range rows {
+		if err := repo.Upsert(ctx, row); err != nil {
+			t.Fatalf("upsert %s: %v", row.Lemma, err)
+		}
+	}
+
+	cases := []struct {
+		query string
+		want  string // lemma of the single expected hit
+	}{
+		{"walk", "walk"},      // lemma
+		{"奔跑", "run"},         // meaning
+		{"优雅", "graceful"},    // meaning
+		{"GRACE", "graceful"}, // case-insensitive lemma
+	}
+	for _, tc := range cases {
+		got, err := repo.List(ctx, tc.query)
+		if err != nil {
+			t.Fatalf("list %q: %v", tc.query, err)
+		}
+		if len(got) != 1 || got[0].Lemma != tc.want {
+			t.Errorf("query %q = %v, want [%s]", tc.query, got, tc.want)
+		}
+	}
+
+	// No match.
+	got, err := repo.List(ctx, "zzz")
+	if err != nil || len(got) != 0 {
+		t.Errorf("query zzz = %v err=%v, want empty", got, err)
 	}
 }
 

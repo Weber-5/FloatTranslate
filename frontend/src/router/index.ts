@@ -4,6 +4,7 @@
  */
 import { createRouter, createWebHashHistory } from 'vue-router'
 import { useSettingsStore } from '@/stores/settings'
+import { useBackendStore } from '@/stores/backend'
 
 const TranslatePage = () => import('@/components/translate/TranslatePage.vue')
 const VocabularyPage = () => import('@/components/vocabulary/VocabularyPage.vue')
@@ -28,6 +29,12 @@ export const router = createRouter({
 })
 
 router.beforeEach(async (to) => {
+  const backend = useBackendStore()
+  // Real mode with the sidecar still down: the full-screen gate handles UX;
+  // no navigation (and no failing API calls) until /health answers.
+  if (backend.isRealMode && !backend.ready) {
+    return false
+  }
   const settings = useSettingsStore()
   if (settings.status !== 'success') {
     await settings.load()

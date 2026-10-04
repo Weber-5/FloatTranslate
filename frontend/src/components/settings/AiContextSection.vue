@@ -3,6 +3,8 @@
  * AI Context settings (docs/06 §9): context/output token limits, auto
  * compact + threshold, Global Context, editable System Prompt with restore
  * default, and the "configured vs effective" clamp notice.
+ * Auto-save policy (Phase 2): text/number fields persist on change with an
+ * 800ms debounce; toggles persist immediately.
  */
 import { computed, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
@@ -22,26 +24,32 @@ const form = reactive({
 })
 
 const globalContextDraft = ref('')
-const globalContextSaved = ref(false)
 const systemPromptSaved = ref(false)
 
+function syncFromApp(): void {
+  const app = settings.app
+  if (!app) return
+  form.context_tokens = app.context_tokens ?? 1000000
+  form.output_tokens = app.output_tokens ?? 4096
+  form.auto_compact = app.auto_compact ?? true
+  form.compact_threshold = app.compact_threshold ?? 80
+  form.ai_system_prompt = app.ai_system_prompt ?? ''
+}
+
+// Sync on (re)load only — never on background saves, so an 800ms debounced
+// save cannot clobber a field the user is still typing into.
 watch(
-  () => settings.app,
-  (app) => {
-    if (!app) return
-    form.context_tokens = app.context_tokens ?? 1000000
-    form.output_tokens = app.output_tokens ?? 4096
-    form.auto_compact = app.auto_compact ?? true
-    form.compact_threshold = app.compact_threshold ?? 80
-    form.ai_system_prompt = app.ai_system_prompt ?? ''
+  () => settings.status,
+  (status) => {
+    if (status === 'success') syncFromApp()
   },
-  { immediate: true, deep: true },
+  { immediate: true },
 )
 
 watch(
   () => settings.globalContext,
   (value) => {
-    globalContextDraft.value = value
+    if (globalContextDraft.value !== value) globalContextDraft.value = value
   },
   { immediate: true },
 )
@@ -57,8 +65,8 @@ const clampNoticeText = computed(() => {
   })
 })
 
-async function persistNumeric(): Promise<void> {
-  await settings.saveApp({
+function persistNumericDebounced(): void {
+  settings.saveAppDebounced({
     context_tokens: Number(form.context_tokens) || 0,
     output_tokens: Number(form.output_tokens) || 0,
     auto_compact: form.auto_compact,
@@ -66,25 +74,25 @@ async function persistNumeric(): Promise<void> {
   })
 }
 
-async function saveSystemPrompt(): Promise<void> {
-  await settings.saveApp({ ai_system_prompt: form.ai_system_prompt })
+function persistAutoCompact(): void {
+  void settings.saveApp({ auto_compact: form.auto_compact })
+}
+
+function persistSystemPromptDebounced(): void {
+  settings.saveAppDebounced({ ai_system_prompt: form.ai_system_prompt })
+}
+
+async function restoreDefaultPrompt(): Promise<void> {
+  form.ai_system_prompt = DEFAULT_AI_SYSTEM_PROMPT
+  await settings.saveApp({ ai_system_prompt: DEFAULT_AI_SYSTEM_PROMPT })
   systemPromptSaved.value = true
   window.setTimeout(() => {
     systemPromptSaved.value = false
   }, 2500)
 }
 
-async function restoreDefaultPrompt(): Promise<void> {
-  form.ai_system_prompt = DEFAULT_AI_SYSTEM_PROMPT
-  await settings.saveApp({ ai_system_prompt: DEFAULT_AI_SYSTEM_PROMPT })
-}
-
-async function saveGlobalContext(): Promise<void> {
-  await settings.saveGlobalContext(globalContextDraft.value)
-  globalContextSaved.value = true
-  window.setTimeout(() => {
-    globalContextSaved.value = false
-  }, 2500)
+function saveGlobalContextDebounced(): void {
+  settings.saveGlobalContextDebounced(globalContextDraft.value)
 }
 </script>
 
@@ -107,7 +115,7 @@ async function saveGlobalContext(): Promise<void> {
         min="0"
         class="input input-number"
         :aria-label="t('settings.aiContext.contextTokens')"
-        @change="persistNumeric"
+        @change="persistNumericDebounced"
       />
     </SettingRow>
 
@@ -118,7 +126,7 @@ async function saveGlobalContext(): Promise<void> {
         min="0"
         class="input input-number"
         :aria-label="t('settings.aiContext.outputTokens')"
-        @change="persistNumeric"
+        @change="persistNumericDebounced"
       />
     </SettingRow>
 
@@ -128,7 +136,7 @@ async function saveGlobalContext(): Promise<void> {
           v-model="form.auto_compact"
           type="checkbox"
           :aria-label="t('settings.aiContext.autoCompact')"
-          @change="persistNumeric"
+          @change="persistAutoCompact"
         />
         <span class="switch-track" aria-hidden="true" />
       </label>
@@ -143,7 +151,7 @@ async function saveGlobalContext(): Promise<void> {
         step="5"
         class="threshold-slider"
         :aria-label="t('settings.aiContext.threshold')"
-        @change="persistNumeric"
+        @change="persistNumericDebounced"
       />
     </SettingRow>
 
@@ -155,18 +163,11 @@ async function saveGlobalContext(): Promise<void> {
         rows="3"
         :placeholder="t('settings.aiContext.globalContextPlaceholder')"
         :aria-label="t('settings.aiContext.globalContext')"
+        @input="saveGlobalContextDebounced"
       />
-      <div class="field-actions">
-        <span v-if="globalContextSaved" class="saved-note">{{ t('common.saved') }}</span>
-        <button
-          type="button"
-          class="btn btn-secondary"
-          :disabled="settings.globalContextSaving"
-          @click="saveGlobalContext"
-        >
-          {{ t('common.save') }}
-        </button>
-      </div>
+      <p v-if="settings.globalContextSaving" class="autosave-note" role="status">
+        {{ t('common.saving') }}
+      </p>
     </div>
 
     <div class="field">
@@ -176,14 +177,12 @@ async function saveGlobalContext(): Promise<void> {
         class="textarea"
         rows="4"
         :aria-label="t('settings.aiContext.systemPrompt')"
+        @input="persistSystemPromptDebounced"
       />
       <div class="field-actions">
         <span v-if="systemPromptSaved" class="saved-note">{{ t('common.saved') }}</span>
         <button type="button" class="btn btn-ghost" @click="restoreDefaultPrompt">
           {{ t('settings.aiContext.restoreDefault') }}
-        </button>
-        <button type="button" class="btn btn-secondary" @click="saveSystemPrompt">
-          {{ t('common.save') }}
         </button>
       </div>
     </div>
@@ -240,6 +239,12 @@ async function saveGlobalContext(): Promise<void> {
 .saved-note {
   font-size: 11px;
   color: var(--success);
+}
+
+.autosave-note {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  text-align: right;
 }
 
 .switch {

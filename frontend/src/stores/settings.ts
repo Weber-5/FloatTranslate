@@ -42,14 +42,16 @@ export const useSettingsStore = defineStore('settings', () => {
 
   const needsOnboarding = computed(() => provider.value !== null && !provider.value.api_key_configured)
 
-  /** Non-null when the provider clamps configured context/output limits. */
+  /** Non-null when the configured context/output limits exceed the effective ones. */
   const clampNotice = computed(() => {
     const caps = capabilities.value
     const settings = app.value
     if (!caps || !settings) return null
-    const configuredContext = settings.context_tokens
+    // 配置值 vs 生效值: prefer the backend-reported configured value when the
+    // capabilities endpoint provides it, fall back to the local setting.
+    const configuredContext = caps.configured_context_tokens ?? settings.context_tokens
     const effectiveContext = caps.effective_context_tokens
-    const configuredOutput = settings.output_tokens
+    const configuredOutput = caps.configured_output_tokens ?? settings.output_tokens
     const effectiveOutput = caps.effective_output_tokens
     const contextClamped =
       configuredContext != null && effectiveContext != null && effectiveContext < configuredContext
@@ -99,6 +101,41 @@ export const useSettingsStore = defineStore('settings', () => {
     }
   }
 
+  const APP_SAVE_DEBOUNCE_MS = 800
+  let appSaveTimer: ReturnType<typeof setTimeout> | null = null
+  let pendingAppPartial: Partial<AppSettings> = {}
+  const appSavePending = ref(false)
+
+  /**
+   * Auto-save for text-like fields (Phase 2 contract): changes within 800ms
+   * coalesce into a single PUT /settings. Toggles/selects use saveApp directly.
+   */
+  function saveAppDebounced(partial: Partial<AppSettings>): void {
+    pendingAppPartial = { ...pendingAppPartial, ...partial }
+    appSavePending.value = true
+    if (appSaveTimer) clearTimeout(appSaveTimer)
+    appSaveTimer = setTimeout(() => {
+      appSaveTimer = null
+      const batch = pendingAppPartial
+      pendingAppPartial = {}
+      void saveApp(batch).finally(() => {
+        if (!appSaveTimer) appSavePending.value = false
+      })
+    }, APP_SAVE_DEBOUNCE_MS)
+  }
+
+  /** Flush any pending debounced app-settings save (used by tests/unload). */
+  async function flushAppSave(): Promise<void> {
+    if (appSaveTimer) {
+      clearTimeout(appSaveTimer)
+      appSaveTimer = null
+      const batch = pendingAppPartial
+      pendingAppPartial = {}
+      await saveApp(batch)
+      appSavePending.value = false
+    }
+  }
+
   async function saveProvider(update: ProviderSettingsUpdate): Promise<void> {
     const api = useApi()
     savingProvider.value = true
@@ -110,11 +147,11 @@ export const useSettingsStore = defineStore('settings', () => {
     }
   }
 
-  async function testConnection(): Promise<ProviderTestResult> {
+  async function testConnection(update: ProviderSettingsUpdate): Promise<ProviderTestResult> {
     providerTestRunning.value = true
     providerTestResult.value = null
     try {
-      providerTestResult.value = await useApi().testProviderConnection()
+      providerTestResult.value = await useApi().testProviderConnection(update)
       return providerTestResult.value
     } finally {
       providerTestRunning.value = false
@@ -129,6 +166,18 @@ export const useSettingsStore = defineStore('settings', () => {
     } finally {
       globalContextSaving.value = false
     }
+  }
+
+  const CONTEXT_SAVE_DEBOUNCE_MS = 800
+  let contextSaveTimer: ReturnType<typeof setTimeout> | null = null
+
+  /** Auto-save for the Global Context textarea (800ms debounce). */
+  function saveGlobalContextDebounced(content: string): void {
+    if (contextSaveTimer) clearTimeout(contextSaveTimer)
+    contextSaveTimer = setTimeout(() => {
+      contextSaveTimer = null
+      void saveGlobalContext(content)
+    }, CONTEXT_SAVE_DEBOUNCE_MS)
   }
 
   async function loadTerminology(): Promise<void> {
@@ -179,6 +228,7 @@ export const useSettingsStore = defineStore('settings', () => {
     status,
     loadError,
     savingApp,
+    appSavePending,
     savingProvider,
     providerTestRunning,
     providerTestResult,
@@ -192,9 +242,12 @@ export const useSettingsStore = defineStore('settings', () => {
     clampNotice,
     load,
     saveApp,
+    saveAppDebounced,
+    flushAppSave,
     saveProvider,
     testConnection,
     saveGlobalContext,
+    saveGlobalContextDebounced,
     loadTerminology,
     addTerm,
     updateTerm,

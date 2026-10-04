@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 
@@ -35,6 +36,10 @@ func (s *Server) ListHistory(w http.ResponseWriter, r *http.Request) {
 
 	rows, next, err := s.history.List(r.Context(), params)
 	if err != nil {
+		if errors.Is(err, repository.ErrInvalidCursor) {
+			apperr.WriteHTTP(w, apperr.New(apperr.CodeInvalidRequest, "cursor 无效", false))
+			return
+		}
 		apperr.WriteHTTP(w, mapRepoError(err, "历史记录"))
 		return
 	}
@@ -50,6 +55,8 @@ func (s *Server) ListHistory(w http.ResponseWriter, r *http.Request) {
 			Kind:      row.Kind,
 			InputText: row.InputText,
 			Result:    result,
+			Source:    row.Source,
+			Model:     row.Model,
 			CreatedAt: row.CreatedAt,
 		})
 	}

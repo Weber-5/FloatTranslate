@@ -64,21 +64,26 @@ func run() error {
 	historyRepo := repository.NewHistoryRepo(db)
 	cacheRepo := repository.NewCacheRepo(db)
 	tabsRepo := repository.NewTabsRepo(db)
+	vocabularyRepo := repository.NewVocabularyRepo(db)
 	termsSvc, err := terminology.NewService(context.Background(), repository.NewTerminologyRepo(db))
 	if err != nil {
 		return fmt.Errorf("load terminology: %w", err)
 	}
 
-	provider := translation.NewMockProvider()
+	// One provider settings store backs both the HTTP handlers and the
+	// translation pipeline resolver, so a saved in-memory API key is
+	// visible everywhere. When the store is not fully configured the
+	// resolver reports ErrNotConfigured and translations fail with
+	// PROVIDER_NOT_CONFIGURED — the mock provider is test-only.
 	providerSettings := api.NewProviderSettingsStore(settingsRepo)
-	pipeline, err := translation.NewPipeline(provider, providerSettings.TranslationModel,
-		termsSvc, cacheRepo, historyRepo)
+	pipeline, err := translation.NewPipeline(providerSettings, providerSettings.TranslationModel,
+		termsSvc, cacheRepo, historyRepo, settingsRepo)
 	if err != nil {
 		return fmt.Errorf("build pipeline: %w", err)
 	}
 
 	server := api.NewServer(cfg, logger, pipeline, settingsRepo, historyRepo, tabsRepo,
-		termsSvc, provider, db.Ping)
+		vocabularyRepo, termsSvc, providerSettings, providerSettings, db.Ping)
 
 	listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", cfg.HTTPPort))
 	if err != nil {

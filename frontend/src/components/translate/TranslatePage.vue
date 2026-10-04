@@ -3,9 +3,15 @@
  * Translate page: renders the active tab's per-tab translation state machine
  * — empty/input → translating → success | cache_success | retryable_error —
  * via TranslateInput / LoadingState / WordResult / TextResult / StateBanner.
+ *
+ * Error variants (Phase 2 contract):
+ * - retryable errors show a retry button;
+ * - UNSUPPORTED_LANGUAGE (and any non-retryable error) is inline without one;
+ * - PROVIDER_NOT_CONFIGURED shows a "前往设置" CTA to the provider section.
  */
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { useRouter } from 'vue-router'
 import { useTabsStore } from '@/stores/tabs'
 import { useTranslationStore } from '@/stores/translation'
 import TranslateInput from './TranslateInput.vue'
@@ -16,6 +22,7 @@ import LoadingState from '@/components/common/LoadingState.vue'
 import StateBanner from '@/components/common/StateBanner.vue'
 
 const { t } = useI18n()
+const router = useRouter()
 const tabsStore = useTabsStore()
 const translationStore = useTranslationStore()
 
@@ -39,6 +46,13 @@ const showLoading = computed(
   () => state.value !== null && state.value.status === 'translating' && response.value === null,
 )
 
+const errorState = computed(() =>
+  state.value !== null && state.value.status === 'retryable_error' ? state.value.error : null,
+)
+
+const showRetry = computed(() => errorState.value?.retryable === true)
+const showProviderCta = computed(() => errorState.value?.code === 'PROVIDER_NOT_CONFIGURED')
+
 /** Retry for a pure failure (no result yet) re-runs the input translation. */
 function onRetry(): void {
   if (!tab.value || !state.value) return
@@ -47,6 +61,10 @@ function onRetry(): void {
   } else {
     void translationStore.translate(tab.value.id)
   }
+}
+
+function goToSettings(): void {
+  void router.push({ path: '/settings', query: { section: 'provider' } })
 }
 
 function askText(): string {
@@ -65,15 +83,27 @@ function askText(): string {
         variant="cache"
         :title="t('translate.cacheBannerTitle')"
         :message="t('translate.cacheBannerDesc')"
+        data-testid="cache-banner"
       />
       <StateBanner
-        v-else-if="state.status === 'retryable_error' && state.error"
+        v-else-if="errorState"
         variant="error"
         :title="t('translate.errorTitle')"
-        :message="state.error.message"
-        show-retry
+        :message="errorState.message"
+        :show-retry="showRetry"
+        data-testid="translate-error-banner"
         @retry="onRetry"
-      />
+      >
+        <button
+          v-if="showProviderCta"
+          type="button"
+          class="btn btn-secondary banner-cta"
+          data-testid="go-to-settings"
+          @click="goToSettings"
+        >
+          {{ t('translate.goToSettings') }}
+        </button>
+      </StateBanner>
 
       <LoadingState v-if="showLoading" :label="t('translate.translating')" />
 
@@ -102,5 +132,10 @@ function askText(): string {
 .page-ask {
   display: flex;
   justify-content: center;
+}
+
+.banner-cta {
+  margin-top: var(--space-2);
+  font-size: 12px;
 }
 </style>

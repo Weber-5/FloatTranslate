@@ -2,9 +2,11 @@
 /**
  * Settings page (docs/03 §10): General / Provider / AI Context / Translation
  * / Network / Data / About. Mock mode is shown subtly next to the title.
+ * Supports ?section=provider deep links (e.g. the translate page CTA).
  */
-import { onMounted } from 'vue'
+import { nextTick, onMounted, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { useRoute } from 'vue-router'
 import { useSettingsStore } from '@/stores/settings'
 import GeneralSection from './GeneralSection.vue'
 import ProviderSection from './ProviderSection.vue'
@@ -17,11 +19,23 @@ import LoadingState from '@/components/common/LoadingState.vue'
 import StateBanner from '@/components/common/StateBanner.vue'
 
 const { t } = useI18n()
+const route = useRoute()
 const settings = useSettingsStore()
 
 onMounted(() => {
   void settings.load()
 })
+
+watch(
+  () => route.query.section,
+  async (section) => {
+    if (section !== 'provider') return
+    await settings.load()
+    await nextTick()
+    document.getElementById('settings-provider')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  },
+  { immediate: true },
+)
 </script>
 
 <template>

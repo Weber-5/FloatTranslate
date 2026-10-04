@@ -4,9 +4,10 @@
  * Detection: `'__TAURI_INTERNALS__' in window` (frozen contract).
  */
 import type { ApiClient, BackendConfig } from './client'
-import { createRealClient } from './client'
+import { createRealClient, probeBackendHealth } from './client'
 
-export { ApiError, toApiError, createRealClient } from './client'
+export { ApiError, toApiError, createRealClient, probeBackendHealth } from './client'
+export { BACKEND_UNAVAILABLE, BACKEND_UNAVAILABLE_MESSAGE } from './client'
 export type {
   ApiClient,
   BackendConfig,
@@ -16,6 +17,7 @@ export type {
 
 let clientPromise: Promise<ApiClient> | null = null
 let resolvedClient: ApiClient | null = null
+let resolvedConfig: BackendConfig | null = null
 let resolvedIsMock = true
 
 export function isTauri(): boolean {
@@ -26,17 +28,24 @@ export function isMockMode(): boolean {
   return resolvedIsMock
 }
 
+/** Base URL/token of the real backend; null in mock mode or before initApi(). */
+export function getBackendConfig(): BackendConfig | null {
+  return resolvedConfig
+}
+
 function resolveClient(): Promise<ApiClient> {
   if (isTauri()) {
     return import('@tauri-apps/api/core')
       .then(({ invoke }) => invoke<BackendConfig>('get_backend_config'))
       .then((config) => {
         resolvedIsMock = false
+        resolvedConfig = config
         return createRealClient(config)
       })
   }
   return import('./mock').then(({ createMockClient }) => {
     resolvedIsMock = true
+    resolvedConfig = null
     return createMockClient()
   })
 }
@@ -69,5 +78,18 @@ export function useApi(): ApiClient {
 export function __resetApiClient(): void {
   clientPromise = null
   resolvedClient = null
+  resolvedConfig = null
   resolvedIsMock = true
+}
+
+/** Test-only: inject a backend config so real-mode helpers are testable. */
+export function __setBackendConfigForTests(config: BackendConfig | null): void {
+  resolvedConfig = config
+}
+
+/** Probe the real backend's /health (no auth). Always false in mock mode. */
+export async function probeBackend(config?: BackendConfig): Promise<boolean> {
+  const target = config ?? resolvedConfig
+  if (!target) return false
+  return probeBackendHealth(target.base_url)
 }

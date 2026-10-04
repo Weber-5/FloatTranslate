@@ -8,6 +8,7 @@ export default {
     cancel: 'Cancel',
     save: 'Save',
     saved: 'Saved',
+    saving: 'Saving…',
     delete: 'Delete',
     edit: 'Edit',
     add: 'Add',
@@ -22,6 +23,15 @@ export default {
     mockHint: 'Mock mode: local simulated data, no network requests',
     desktopOnly: 'Requires the Tauri desktop host (placeholder in skeleton)',
     appName: 'FloatTranslate',
+  },
+
+  backend: {
+    startingTitle: 'Backend service starting',
+    startingDesc: 'Connecting to the local service, please wait…',
+    restartingTitle: 'Backend service restarting',
+    failedTitle: 'Backend service unavailable',
+    failedDesc: 'Cannot reach the local service. Please try again shortly.',
+    failedHint: 'Make sure the backend process is running, then retry.',
   },
 
   tabs: {
@@ -57,6 +67,7 @@ export default {
     cacheBannerTitle: 'Showing local cached result',
     cacheBannerDesc: 'This result came from the local cache; the model was not called.',
     errorTitle: 'Translation failed',
+    goToSettings: 'Go to settings',
     askAi: 'Ask AI',
     languageError: 'FloatTranslate 1.0 only supports English to Chinese for now',
   },
@@ -115,7 +126,7 @@ export default {
     clearMessage: 'All history records will be deleted (the vocabulary is kept). This cannot be undone.',
     loadMore: 'Load more',
     sourceModel: 'Model',
-    sourceCache: 'Cache',
+    sourceCache: 'Local cache',
   },
 
   settings: {
@@ -148,7 +159,8 @@ export default {
       baseUrl: 'Base URL',
       apiKey: 'API Key',
       apiKeyPlaceholder: 'sk-…',
-      apiKeyConfiguredPrefix: 'Configured',
+      apiKeyConfiguredPlaceholder: 'Configured — type to replace',
+      apiKeyEmptyPlaceholder: 'Not configured',
       apiKeySaveHint: 'The API Key is stored in Windows Credential Manager; the frontend cannot read the plaintext afterwards. Leave empty to keep it unchanged.',
       translationModel: 'Translation model',
       chatModel: 'Chat model',

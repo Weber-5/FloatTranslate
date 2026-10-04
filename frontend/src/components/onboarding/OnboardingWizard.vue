@@ -1,12 +1,14 @@
 <script setup lang="ts">
 /**
- * First-launch wizard (docs/00 §10): API key / base URL / models /
- * test connection, then enter the main window. Only reachable when
- * `api_key_configured` is false (router guard).
+ * First-launch wizard (docs/00 §10): provider mode / base URL / API key /
+ * models / test connection. The backend tests the SUBMITTED config; only a
+ * successful test persists via PUT /settings/provider and enters the main
+ * window. There is no skip — a key must be configured first (router guard).
  */
-import { computed, reactive, ref } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
+import type { ProviderMode, ProviderSettingsUpdate } from '@/api/types'
 import { useSettingsStore } from '@/stores/settings'
 import IconButton from '@/components/common/IconButton.vue'
 import IconEye from '@/components/icons/IconEye.vue'
@@ -16,46 +18,67 @@ const { t } = useI18n()
 const router = useRouter()
 const settings = useSettingsStore()
 
+const DEEPSEEK_PRESET_BASE_URL = 'https://api.deepseek.com'
+const DEFAULT_MODEL = 'deepseek-flash'
+
 const form = reactive({
+  mode: 'deepseek' as ProviderMode,
   api_key: '',
-  base_url: 'https://api.deepseek.com',
-  translation_model: 'deepseek-flash',
-  chat_model: 'deepseek-flash',
+  base_url: DEEPSEEK_PRESET_BASE_URL,
+  translation_model: DEFAULT_MODEL,
+  chat_model: DEFAULT_MODEL,
 })
 
+const baseUrlTouched = ref(false)
 const showKey = ref(false)
 const testing = ref(false)
-const testOk = ref(false)
-const testMessage = ref<string | null>(null)
 const error = ref<string | null>(null)
 
-const canEnter = computed(() => testOk.value)
+watch(
+  () => form.mode,
+  (mode) => {
+    // Apply the deepseek preset unless the user typed a custom base URL.
+    if (mode === 'deepseek' && !baseUrlTouched.value) {
+      form.base_url = DEEPSEEK_PRESET_BASE_URL
+    }
+  },
+)
 
-async function saveAndTest(): Promise<void> {
+function buildUpdate(): ProviderSettingsUpdate {
+  return {
+    mode: form.mode,
+    base_url: form.base_url.trim(),
+    translation_model: form.translation_model.trim() || DEFAULT_MODEL,
+    chat_model: form.chat_model.trim() || DEFAULT_MODEL,
+    api_key: form.api_key.trim(),
+  }
+}
+
+/**
+ * Test with the CURRENT form values; on success persist the same values and
+ * re-fetch capabilities before entering the main UI. On failure: stay here.
+ */
+async function testAndSave(): Promise<void> {
   error.value = null
-  testMessage.value = null
   const key = form.api_key.trim()
   if (key.length === 0) {
     error.value = t('onboarding.needTest')
     return
   }
+  const update = buildUpdate()
   testing.value = true
   try {
-    await settings.saveProvider({
-      mode: 'deepseek',
-      base_url: form.base_url.trim(),
-      translation_model: form.translation_model.trim(),
-      chat_model: form.chat_model.trim(),
-      api_key: key,
-    })
-    form.api_key = ''
-    showKey.value = false
-    const result = await settings.testConnection()
-    testOk.value = result.ok
-    testMessage.value = result.message ?? null
+    const result = await settings.testConnection(update)
     if (!result.ok) {
       error.value = `${t('settings.provider.testFailed')}：${result.message ?? ''}`
+      return
     }
+    await settings.saveProvider(update)
+    // Re-fetch provider + capabilities with the now-working configuration.
+    await settings.load(true)
+    form.api_key = ''
+    showKey.value = false
+    await router.push('/translate')
   } catch (err) {
     error.value = err instanceof Error ? err.message : t('errors.unknown')
   } finally {
@@ -63,9 +86,7 @@ async function saveAndTest(): Promise<void> {
   }
 }
 
-function enter(): void {
-  void router.push('/translate')
-}
+const busyLabel = computed(() => (testing.value ? t('onboarding.testing') : t('onboarding.saveAndTest')))
 </script>
 
 <template>
@@ -73,6 +94,14 @@ function enter(): void {
     <div class="wizard card">
       <h1 class="wizard-title">{{ t('onboarding.title') }}</h1>
       <p class="wizard-desc">{{ t('onboarding.desc') }}</p>
+
+      <label class="field">
+        <span class="field-label">{{ t('settings.provider.mode') }}</span>
+        <select v-model="form.mode" class="select" data-testid="onboarding-mode">
+          <option value="deepseek">{{ t('settings.provider.modeDeepseek') }}</option>
+          <option value="openai_compatible">{{ t('settings.provider.modeOpenai') }}</option>
+        </select>
+      </label>
 
       <label class="field">
         <span class="field-label">{{ t('onboarding.apiKey') }}</span>
@@ -100,7 +129,13 @@ function enter(): void {
 
       <label class="field">
         <span class="field-label">{{ t('onboarding.baseUrl') }}</span>
-        <input v-model="form.base_url" type="text" class="input" data-testid="onboarding-base-url" />
+        <input
+          v-model="form.base_url"
+          type="text"
+          class="input"
+          data-testid="onboarding-base-url"
+          @input="baseUrlTouched = true"
+        />
       </label>
 
       <label class="field">
@@ -113,29 +148,19 @@ function enter(): void {
         <input v-model="form.chat_model" type="text" class="input" />
       </label>
 
-      <p v-if="error" class="notice notice-error" role="alert">{{ error }}</p>
-      <p v-else-if="testOk" class="notice notice-success" role="status">
-        {{ t('settings.provider.testOk') }}{{ testMessage ? `：${testMessage}` : '' }}
+      <p v-if="error" class="notice notice-error" role="alert" data-testid="onboarding-error">
+        {{ error }}
       </p>
 
       <div class="wizard-actions">
         <button
           type="button"
-          class="btn btn-secondary"
+          class="btn btn-primary wizard-test"
           :disabled="testing"
           data-testid="onboarding-test"
-          @click="saveAndTest"
+          @click="testAndSave"
         >
-          {{ testing ? t('onboarding.testing') : t('onboarding.saveAndTest') }}
-        </button>
-        <button
-          type="button"
-          class="btn btn-primary"
-          :disabled="!canEnter"
-          data-testid="onboarding-enter"
-          @click="enter"
-        >
-          {{ t('onboarding.enter') }}
+          {{ busyLabel }}
         </button>
       </div>
     </div>
@@ -216,8 +241,12 @@ function enter(): void {
 
 .wizard-actions {
   display: flex;
-  justify-content: space-between;
+  justify-content: stretch;
   gap: var(--space-2);
   margin-top: var(--space-2);
+}
+
+.wizard-test {
+  flex: 1;
 }
 </style>

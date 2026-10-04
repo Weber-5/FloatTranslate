@@ -8,6 +8,7 @@ export default {
     cancel: '取消',
     save: '保存',
     saved: '已保存',
+    saving: '保存中…',
     delete: '删除',
     edit: '编辑',
     add: '添加',
@@ -22,6 +23,15 @@ export default {
     mockHint: 'Mock 模式：本地模拟数据，无网络请求',
     desktopOnly: '需要 Tauri 桌面宿主支持（骨架阶段为占位）',
     appName: 'FloatTranslate',
+  },
+
+  backend: {
+    startingTitle: '后端服务启动中',
+    startingDesc: '正在连接本地服务，请稍候…',
+    restartingTitle: '后端服务重启中',
+    failedTitle: '后端服务不可用',
+    failedDesc: '无法连接本地服务，请稍后重试。',
+    failedHint: '请确认后端进程已启动，然后点击重试。',
   },
 
   tabs: {
@@ -57,6 +67,7 @@ export default {
     cacheBannerTitle: '已展示本地缓存结果',
     cacheBannerDesc: '本次结果来自本地缓存，未调用模型。',
     errorTitle: '翻译失败',
+    goToSettings: '前往设置',
     askAi: 'Ask AI',
     languageError: 'FloatTranslate 1.0 暂仅支持英译中',
   },
@@ -115,7 +126,7 @@ export default {
     clearMessage: '将删除全部历史记录（不影响单词本）。此操作不可撤销。',
     loadMore: '加载更多',
     sourceModel: '模型',
-    sourceCache: '缓存',
+    sourceCache: '本地缓存',
   },
 
   settings: {
@@ -148,7 +159,8 @@ export default {
       baseUrl: 'Base URL',
       apiKey: 'API Key',
       apiKeyPlaceholder: 'sk-…',
-      apiKeyConfiguredPrefix: '已配置',
+      apiKeyConfiguredPlaceholder: '已配置（输入以更换）',
+      apiKeyEmptyPlaceholder: '未配置',
       apiKeySaveHint: 'API Key 保存到 Windows 凭据管理器，保存后前端无法读取明文；留空表示不修改。',
       translationModel: '翻译模型',
       chatModel: '对话模型',

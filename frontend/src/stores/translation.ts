@@ -135,21 +135,32 @@ export const useTranslationStore = defineStore('translation', () => {
     return openWordLookup(item.word.word, { wordData: item.word })
   }
 
-  /** History drawer: reopen as a new tab from the stored result. */
-  function openHistoryItem(item: HistoryItem): string {
+  /**
+   * History drawer: reopen as a new tab. The result is loaded from the stored
+   * record via GET /translations/{id} — a plain DB read, never a provider
+   * call. Falls back to the history payload if the record is gone.
+   */
+  async function openHistoryItem(item: HistoryItem): Promise<string> {
     const tabsStore = useTabsStore()
     const tab = tabsStore.openFromHistory(item)
     const state = ensureState(tab.id)
-    state.response = {
-      translation_id: item.id,
-      kind: item.kind,
-      source: 'model',
-      result: item.result,
-      model: '',
-      created_at: item.created_at,
-    }
-    state.status = 'success'
+    state.status = 'translating'
     state.error = null
+    try {
+      const response = await useApi().getTranslation(item.id)
+      hydrateFromResponse(tab.id, response)
+    } catch {
+      state.response = {
+        translation_id: item.id,
+        kind: item.kind,
+        source: item.source ?? 'model',
+        result: item.result,
+        model: item.model ?? '',
+        created_at: item.created_at,
+      }
+      state.status = 'success'
+      state.error = null
+    }
     return tab.id
   }
 
@@ -163,6 +174,36 @@ export const useTranslationStore = defineStore('translation', () => {
     else state.input = response.result.source_markdown
   }
 
+  /**
+   * Boot restore incl. content hydration (docs/00 §2 重启恢复): tabs carrying
+   * a translation_id are refilled via GET /translations/{id} — a plain DB
+   * read, never a provider call; tabs with stored word_data keep their local
+   * structured content; empty tabs stay in the empty input state.
+   */
+  async function restoreTabsWithHydration(): Promise<void> {
+    const tabsStore = useTabsStore()
+    try {
+      await tabsStore.restore()
+    } catch {
+      tabsStore.ensureTab()
+      return
+    }
+    await Promise.all(
+      tabsStore.tabs.map(async (tab) => {
+        const translationId = tab.payload.translation_id
+        if (!translationId || tab.payload.word_data || stateFor(tab.id).response) {
+          return
+        }
+        try {
+          const response = await useApi().getTranslation(translationId)
+          hydrateFromResponse(tab.id, response)
+        } catch {
+          // Stored translation no longer available — the tab stays an input tab.
+        }
+      }),
+    )
+  }
+
   return {
     states,
     stateFor,
@@ -174,5 +215,6 @@ export const useTranslationStore = defineStore('translation', () => {
     openSavedWord,
     openHistoryItem,
     hydrateFromResponse,
+    restoreTabsWithHydration,
   }
 })

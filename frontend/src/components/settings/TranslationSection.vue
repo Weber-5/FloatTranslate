@@ -1,7 +1,8 @@
 <script setup lang="ts">
 /**
  * Translation settings: terminology CRUD (case-insensitive unique source)
- * and the custom translation prompt (docs/00 §9).
+ * and the custom translation prompt. The prompt auto-saves on input with an
+ * 800ms debounce (Phase 2 policy); terminology keeps explicit actions.
  */
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
@@ -25,17 +26,18 @@ const editingId = ref<string | null>(null)
 const editForm = reactive({ source: '', target: '' })
 
 const customPromptDraft = ref('')
-const promptSaved = ref(false)
 
 onMounted(() => {
   void settings.loadTerminology()
 })
 
+// Sync the prompt draft on (re)load only; saves never clobber typing.
 watch(
-  () => settings.app,
-  (app) => {
-    if (!app) return
-    if (!customPromptDraft.value) customPromptDraft.value = app.custom_translation_prompt ?? ''
+  () => settings.status,
+  (status) => {
+    if (status === 'success' && settings.app) {
+      customPromptDraft.value = settings.app.custom_translation_prompt ?? ''
+    }
   },
   { immediate: true },
 )
@@ -67,12 +69,8 @@ async function commitEdit(): Promise<void> {
   editingId.value = null
 }
 
-async function saveCustomPrompt(): Promise<void> {
-  await settings.saveApp({ custom_translation_prompt: customPromptDraft.value })
-  promptSaved.value = true
-  window.setTimeout(() => {
-    promptSaved.value = false
-  }, 2500)
+function saveCustomPromptDebounced(): void {
+  settings.saveAppDebounced({ custom_translation_prompt: customPromptDraft.value })
 }
 </script>
 
@@ -149,13 +147,8 @@ async function saveCustomPrompt(): Promise<void> {
         rows="3"
         :placeholder="t('settings.translation.customPromptPlaceholder')"
         :aria-label="t('settings.translation.customPrompt')"
+        @input="saveCustomPromptDebounced"
       />
-      <div class="field-actions">
-        <span v-if="promptSaved" class="saved-note">{{ t('common.saved') }}</span>
-        <button type="button" class="btn btn-secondary" @click="saveCustomPrompt">
-          {{ t('common.save') }}
-        </button>
-      </div>
     </div>
   </div>
 </template>

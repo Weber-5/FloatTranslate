@@ -10,14 +10,12 @@ import TitleBar from './TitleBar.vue'
 import BottomNav from './BottomNav.vue'
 import AiSidebar from './AiSidebar.vue'
 import HistoryDrawer from './HistoryDrawer.vue'
-import { useTabsStore } from '@/stores/tabs'
-import { useTranslationStore } from '@/stores/translation'
 import { useUiStore } from '@/stores/ui'
-import { useApi } from '@/api'
+import { useTranslationStore } from '@/stores/translation'
 import { useDebouncedTabsPersist } from '@/composables/useDebouncedTabsPersist'
 
 const ui = useUiStore()
-const tabsStore = useTabsStore()
+const translationStore = useTranslationStore()
 const { flushPersist } = useDebouncedTabsPersist()
 
 function onBeforeUnload(): void {
@@ -26,36 +24,12 @@ function onBeforeUnload(): void {
 
 onMounted(() => {
   window.addEventListener('beforeunload', onBeforeUnload)
-  void restoreTabs()
+  void translationStore.restoreTabsWithHydration()
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('beforeunload', onBeforeUnload)
 })
-
-async function restoreTabs(): Promise<void> {
-  try {
-    await tabsStore.restore()
-  } catch {
-    tabsStore.ensureTab()
-    return
-  }
-  const translationStore = useTranslationStore()
-  await Promise.all(
-    tabsStore.tabs.map(async (tab) => {
-      const translationId = tab.payload.translation_id
-      if (!translationId || tab.payload.word_data || translationStore.stateFor(tab.id).response) {
-        return
-      }
-      try {
-        const response = await useApi().getTranslation(translationId)
-        translationStore.hydrateFromResponse(tab.id, response)
-      } catch {
-        // Stored translation no longer available — the tab stays an input tab.
-      }
-    }),
-  )
-}
 </script>
 
 <template>

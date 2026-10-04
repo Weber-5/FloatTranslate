@@ -84,6 +84,28 @@ func (s *Service) Apply(text string) (string, []repository.TerminologyRow) {
 	return text, applied
 }
 
+// FindViolations is the terminology post-check (docs/09): it reports every
+// applied term whose source term still occurs (case-insensitive whole-match)
+// in the translated output, i.e. the model did not use the required target.
+// Called with the masked (placeholder-substituted) payload so protected
+// content cannot trigger false violations.
+func FindViolations(output string, applied []repository.TerminologyRow) []repository.TerminologyRow {
+	if output == "" || len(applied) == 0 {
+		return nil
+	}
+	var violated []repository.TerminologyRow
+	for _, t := range applied {
+		re, err := compileTermPattern(t.Source)
+		if err != nil {
+			continue
+		}
+		if re.MatchString(output) {
+			violated = append(violated, t)
+		}
+	}
+	return violated
+}
+
 // compileTermPattern builds a case-insensitive whole-match pattern for a
 // source term. Word boundaries are only enforced where the term starts/ends
 // with a word character.

@@ -210,6 +210,8 @@ export function createMockClient(): ApiClient {
           kind: cached.kind,
           input_text: trimmed,
           result: cached.result,
+          source: 'cache',
+          model: cached.model,
           created_at: now,
         })
         return { ...cached, source: 'cache' }
@@ -236,6 +238,8 @@ export function createMockClient(): ApiClient {
       kind,
       input_text: trimmed,
       result,
+      source: 'model',
+      model: TRANSLATION_MODEL,
       created_at: now,
     })
     return response
@@ -274,10 +278,18 @@ export function createMockClient(): ApiClient {
       }
     },
 
-    async testProviderConnection(): Promise<ProviderTestResult> {
+    async testProviderConnection(update: ProviderSettingsUpdate): Promise<ProviderTestResult> {
       await sleep(400)
-      if (!state.provider.api_key_configured) {
+      // The backend tests the SUBMITTED config, not the saved one (docs/04 §4).
+      const submittedKey = update.api_key?.trim() ?? ''
+      if (!submittedKey && !state.provider.api_key_configured) {
         return { ok: false, message: '尚未配置 API Key' }
+      }
+      if (submittedKey === 'invalid-key') {
+        return { ok: false, message: 'Mock：API Key 无效' }
+      }
+      if (!update.base_url.trim()) {
+        return { ok: false, message: 'Mock：Base URL 不能为空' }
       }
       return { ok: true, message: 'Mock 连接成功（未发起任何网络请求）' }
     },
