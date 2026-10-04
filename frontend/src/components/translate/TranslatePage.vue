@@ -1,0 +1,106 @@
+<script setup lang="ts">
+/**
+ * Translate page: renders the active tab's per-tab translation state machine
+ * — empty/input → translating → success | cache_success | retryable_error —
+ * via TranslateInput / LoadingState / WordResult / TextResult / StateBanner.
+ */
+import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
+import { useTabsStore } from '@/stores/tabs'
+import { useTranslationStore } from '@/stores/translation'
+import TranslateInput from './TranslateInput.vue'
+import WordResult from './WordResult.vue'
+import TextResult from './TextResult.vue'
+import AskAiButton from './AskAiButton.vue'
+import LoadingState from '@/components/common/LoadingState.vue'
+import StateBanner from '@/components/common/StateBanner.vue'
+
+const { t } = useI18n()
+const tabsStore = useTabsStore()
+const translationStore = useTranslationStore()
+
+const tab = computed(() => tabsStore.activeTab)
+
+const state = computed(() =>
+  tab.value ? translationStore.stateFor(tab.value.id) : null,
+)
+
+const response = computed(() => state.value?.response ?? null)
+
+const isWord = computed(
+  () => response.value !== null && 'lemma' in response.value.result,
+)
+
+const showInput = computed(
+  () => state.value !== null && response.value === null && state.value.status !== 'translating',
+)
+
+const showLoading = computed(
+  () => state.value !== null && state.value.status === 'translating' && response.value === null,
+)
+
+/** Retry for a pure failure (no result yet) re-runs the input translation. */
+function onRetry(): void {
+  if (!tab.value || !state.value) return
+  if (response.value) {
+    void translationStore.retranslate(tab.value.id)
+  } else {
+    void translationStore.translate(tab.value.id)
+  }
+}
+
+function askText(): string {
+  if (!response.value) return ''
+  const result = response.value.result
+  if ('lemma' in result) return result.word
+  return result.source_markdown
+}
+</script>
+
+<template>
+  <section class="translate-page">
+    <template v-if="tab && state">
+      <StateBanner
+        v-if="response && state.status === 'cache_success'"
+        variant="cache"
+        :title="t('translate.cacheBannerTitle')"
+        :message="t('translate.cacheBannerDesc')"
+      />
+      <StateBanner
+        v-else-if="state.status === 'retryable_error' && state.error"
+        variant="error"
+        :title="t('translate.errorTitle')"
+        :message="state.error.message"
+        show-retry
+        @retry="onRetry"
+      />
+
+      <LoadingState v-if="showLoading" :label="t('translate.translating')" />
+
+      <TranslateInput v-else-if="showInput" :tab-id="tab.id" />
+
+      <template v-else-if="response">
+        <WordResult v-if="isWord" :response="response" />
+        <TextResult v-else :response="response" />
+        <div class="page-ask">
+          <AskAiButton :text="askText()" />
+        </div>
+      </template>
+    </template>
+  </section>
+</template>
+
+<style scoped>
+.translate-page {
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-height: 100%;
+}
+
+.page-ask {
+  display: flex;
+  justify-content: center;
+}
+</style>

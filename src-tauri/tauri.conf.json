@@ -1,0 +1,29 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "FloatTranslate",
+  "version": "1.0.0",
+  "identifier": "com.weber5.floattranslate",
+  "build": {
+    "devUrl": "http://localhost:5173",
+    "frontendDist": "../frontend/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "FloatTranslate",
+        "width": 420,
+        "height": 720,
+        "minWidth": 360,
+        "minHeight": 520,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "resizable": true,
+        "visible": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  }
+}

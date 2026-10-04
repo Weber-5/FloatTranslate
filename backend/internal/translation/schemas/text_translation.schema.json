@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://floattranslate.local/schema/text-translation.json",
+  "title": "TextTranslation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "source_markdown",
+    "translated_markdown",
+    "segments"
+  ],
+  "properties": {
+    "source_markdown": {
+      "type": "string"
+    },
+    "translated_markdown": {
+      "type": "string"
+    },
+    "segments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source",
+          "translation"
+        ],
+        "properties": {
+          "source": {
+            "type": "string"
+          },
+          "translation": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}
