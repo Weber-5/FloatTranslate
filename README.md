@@ -1,5 +1,7 @@
 # FloatTranslate 1.0 — 完整开发文档
 
+<p align="center"><img src="logo.svg" width="96" alt="FloatTranslate logo"></p>
+
 > 状态：**需求冻结 / Ready for implementation**  
 > 平台：Windows 10/11  
 > License：MIT  

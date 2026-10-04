@@ -31,8 +31,8 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
         .item(&quit)
         .build()?;
 
-    // Phase 1 placeholder icon (src-tauri/icons/icon.ico); the real brand
-    // icon arrives with packaging in Phase 6.
+    // Brand icon (built from scripts/build-icons.mjs → src-tauri/icons/icon.ico;
+    // the exe/installer icons come from the same file via tauri.conf.json).
     let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/icon.ico"))?;
 
     TrayIconBuilder::with_id(TRAY_ID)
