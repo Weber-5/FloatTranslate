@@ -5,6 +5,7 @@
  */
 import { ref } from 'vue'
 import { defineStore } from 'pinia'
+import { expandForSidebar, collapseSidebar } from '@/services/window'
 
 export type ToastTone = 'info' | 'success' | 'error'
 
@@ -36,8 +37,16 @@ export const useUiStore = defineStore('ui', () => {
     toasts.value = toasts.value.filter((toast) => toast.id !== id)
   }
 
+  /**
+   * improvement bug #2: the sidebar fans OUT to the right of the translate
+   * area — the WINDOW widens so the main pane keeps its size; closing
+   * restores the remembered main width. Window resizing is best-effort (no-op
+   * outside Tauri); the panel shows/hides regardless.
+   */
   function toggleSidebar(): void {
     sidebarOpen.value = !sidebarOpen.value
+    if (sidebarOpen.value) void expandForSidebar()
+    else void collapseSidebar()
   }
 
   function toggleHistory(): void {

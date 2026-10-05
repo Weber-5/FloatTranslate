@@ -33,8 +33,8 @@ describe('semver comparison (docs/10 §5)', () => {
   })
 
   it('compares major/minor/patch lexicographically', () => {
-    expect(compareSemver('v1.0.1', APP_VERSION)).toBeGreaterThan(0)
-    expect(compareSemver('v1.0.0', APP_VERSION)).toBe(0)
+    expect(compareSemver('v1.0.2', APP_VERSION)).toBeGreaterThan(0)
+    expect(compareSemver(`v${APP_VERSION}`, APP_VERSION)).toBe(0)
     expect(compareSemver('v0.9.9', APP_VERSION)).toBeLessThan(0)
     expect(compareSemver('v2.0.0', 'v1.99.99')).toBeGreaterThan(0)
     expect(compareSemver('v1.10.0', 'v1.9.9')).toBeGreaterThan(0)
@@ -58,7 +58,8 @@ describe('update service', () => {
     const latest = await fetchLatestRelease()
     expect(url).toBe('https://api.github.com/repos/Weber-5/FloatTranslate/releases/latest')
     expect(accept).toBe('application/vnd.github+json')
-    expect(latest.tag_name).toBe('v1.0.1')
+    expect(latest).not.toBeNull()
+    expect(latest!.tag_name).toBe('v1.0.1')
   })
 
   it('rejects with UpdateCheckError on network/HTTP failures', async () => {
@@ -80,6 +81,17 @@ describe('update service', () => {
     expect(same.status).toBe('up-to-date')
     const older = await checkForUpdate(APP_VERSION, { tag_name: 'v0.9.0' })
     expect(older.status).toBe('up-to-date')
+  })
+
+  it('treats "no published release" (HTTP 404) as up-to-date, not an error', async () => {
+    // improvement bug #7: with only a draft release, /releases/latest
+    // answers 404 — that must never surface as a failed update check.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('Not Found', { status: 404 })))
+    const latest = await fetchLatestRelease()
+    expect(latest).toBeNull()
+    const result = await checkForUpdate(APP_VERSION)
+    expect(result.status).toBe('up-to-date')
+    expect(result.latest).toBeNull()
   })
 })
 
@@ -151,7 +163,7 @@ describe('AboutSection update check UI', () => {
     wrapper.unmount()
   })
 
-  it('mock demo flag simulates v1.0.1 without any network request', async () => {
+  it('mock demo flag simulates a newer patch without any network request', async () => {
     const fetchMock = vi.fn()
     vi.stubGlobal('fetch', fetchMock)
     const { i18n } = await setupFreshEnv()
@@ -165,7 +177,11 @@ describe('AboutSection update check UI', () => {
     await flushPromises()
 
     expect(fetchMock).not.toHaveBeenCalled()
-    expect(wrapper.find('[data-testid="update-banner"]').text()).toContain('v1.0.1')
+    const banner = wrapper.find('[data-testid="update-banner"]')
+    expect(banner.exists()).toBe(true)
+    // The simulated version is always one patch above the running version.
+    const [major, minor, patch] = APP_VERSION.split('.').map(Number)
+    expect(banner.text()).toContain(`v${major}.${minor}.${patch + 1}`)
     wrapper.unmount()
   })
 

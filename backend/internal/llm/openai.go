@@ -119,11 +119,12 @@ type chatMessage struct {
 	Content string `json:"content"`
 }
 
-// chatRequest is the Chat Completions request shape. Translation (Complete)
-// always leaves EnableThinking nil so the field is never serialized
-// (docs/06 §11: translation thinking is always off and unknown fields must
-// not be sent to best-effort providers); Stream sets it to true only when
-// thinking was requested.
+// chatRequest is the Chat Completions request shape. EnableThinking is
+// ALWAYS serialized (explicit true/false): hybrid-reasoning models on
+// OpenAI-compatible endpoints default to thinking ON when the field is
+// absent, which made translation uselessly slow (improvement bug #1).
+// Translation (Complete/ChatComplete) pins false (docs/06 §11); Stream
+// carries the user's thinking toggle.
 type chatRequest struct {
 	Model          string          `json:"model"`
 	Messages       []chatMessage   `json:"messages"`
@@ -131,7 +132,7 @@ type chatRequest struct {
 	Temperature    float64         `json:"temperature"`
 	ResponseFormat *responseFormat `json:"response_format,omitempty"`
 	MaxTokens      *int            `json:"max_tokens,omitempty"`
-	EnableThinking *bool           `json:"enable_thinking,omitempty"`
+	EnableThinking *bool           `json:"enable_thinking"`
 }
 
 type responseFormat struct {
@@ -162,6 +163,10 @@ func (a *OpenAIAdapter) Complete(ctx context.Context, req CompleteRequest) (Comp
 		Temperature:    0.2,
 		ResponseFormat: &responseFormat{Type: "json_object"},
 	}
+	// Translation must never think (docs/06 §11): explicit false so hybrid
+	// models whose default is "thinking on" stay fast.
+	enableThinking := false
+	body.EnableThinking = &enableThinking
 	content, err := a.postChat(ctx, body)
 	if err != nil {
 		return CompleteResponse{}, err

@@ -15,6 +15,7 @@ import { useUiStore } from '@/stores/ui'
 import { useTranslationStore } from '@/stores/translation'
 import { handleTabShortcut } from '@/composables/useTabShortcuts'
 import { useDebouncedTabsPersist } from '@/composables/useDebouncedTabsPersist'
+import { restoreMainWidthAtBoot } from '@/services/window'
 
 const ui = useUiStore()
 const translationStore = useTranslationStore()
@@ -33,6 +34,9 @@ onMounted(() => {
   window.addEventListener('beforeunload', onBeforeUnload)
   window.addEventListener('keydown', onKeyDown)
   void translationStore.restoreTabsWithHydration()
+  // improvement bug #2 residue: shrink back when the app exited with the
+  // sidebar expanded (persisted geometry is the widened window).
+  void restoreMainWidthAtBoot()
 })
 
 onBeforeUnmount(() => {

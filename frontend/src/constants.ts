@@ -1,7 +1,7 @@
 /**
  * Application-wide constants shared by stores, mock client and settings UI.
  */
-export const APP_VERSION = '1.0.0'
+export const APP_VERSION = '1.0.1'
 
 /** Frozen hotkey defaults (docs/00 §3), mirrored by the Go settings store. */
 export const DEFAULT_HOTKEY_TOGGLE = 'Ctrl+Alt+Space'

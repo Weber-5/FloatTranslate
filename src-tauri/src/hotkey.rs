@@ -29,9 +29,10 @@
 //! it explicitly to be safe).
 
 use std::fmt;
+use std::path::Path;
 use std::sync::Mutex;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 use tauri_plugin_global_shortcut::{
     Code, Modifiers as ShortcutModifiers, Shortcut, ShortcutEvent, ShortcutState,
@@ -646,6 +647,53 @@ pub(crate) fn handle_shortcut_event(app: &AppHandle, shortcut: &Shortcut, event:
     }
 }
 
+// ---------------------------------------------------------------------------
+// Persistence (improvement bug #5)
+// ---------------------------------------------------------------------------
+
+/// Name of the last-applied-bindings file below the data root. The bindings
+/// are re-applied at app startup BEFORE the webview boots, so the hotkeys
+/// work from the first second instead of only after the frontend applied the
+/// settings (the frontend remains the runtime authority).
+pub const PERSISTENCE_FILENAME: &str = "hotkeys.json";
+
+/// The persisted binding pair (same strings as the `apply_hotkeys` command).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedHotkeys {
+    pub show_hide: String,
+    pub translate_selection: String,
+}
+
+/// Saves the applied bindings (best effort; failures are logged by callers).
+pub fn save_persisted(path: &Path, saved: &PersistedHotkeys) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(saved)
+        .map_err(|err| format!("encode {PERSISTENCE_FILENAME}: {err}"))?;
+    std::fs::write(path, json).map_err(|err| format!("write {PERSISTENCE_FILENAME}: {err}"))
+}
+
+/// Loads the persisted bindings; `None` when missing or malformed (a corrupt
+/// file is deleted so the next successful apply can rewrite it).
+pub fn load_persisted(path: &Path) -> Option<PersistedHotkeys> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(err) => {
+            log_line(&format!("failed to read {PERSISTENCE_FILENAME}: {err}"));
+            return None;
+        }
+    };
+    match serde_json::from_str::<PersistedHotkeys>(&raw) {
+        Ok(parsed) => Some(parsed),
+        Err(err) => {
+            log_line(&format!(
+                "malformed {PERSISTENCE_FILENAME} discarded: {err}"
+            ));
+            let _ = std::fs::remove_file(path);
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1044,5 +1092,34 @@ mod tests {
             serde_json::to_string(&conflict).unwrap(),
             r#"{"registered":false,"conflict":"Ctrl+Alt+X"}"#
         );
+    }
+
+    // --- persistence --------------------------------------------------------
+
+    #[test]
+    fn persisted_hotkeys_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(PERSISTENCE_FILENAME);
+        let saved = PersistedHotkeys {
+            show_hide: "Ctrl+Alt+Space".to_string(),
+            translate_selection: "Ctrl+Alt+Q".to_string(),
+        };
+        save_persisted(&path, &saved).unwrap();
+        assert_eq!(load_persisted(&path), Some(saved));
+    }
+
+    #[test]
+    fn load_persisted_missing_file_is_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(load_persisted(&tmp.path().join(PERSISTENCE_FILENAME)), None);
+    }
+
+    #[test]
+    fn load_persisted_malformed_is_none_and_removes_the_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(PERSISTENCE_FILENAME);
+        std::fs::write(&path, "{not json").unwrap();
+        assert_eq!(load_persisted(&path), None);
+        assert!(!path.exists(), "malformed file must be discarded");
     }
 }

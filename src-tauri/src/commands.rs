@@ -103,9 +103,22 @@ pub fn apply_hotkeys(
     hotkeys: HotkeyInput,
     state: State<'_, AppState>,
 ) -> Result<ApplyHotkeysResult, String> {
-    Ok(state
+    let result = state
         .hotkeys
-        .apply(&hotkeys.show_hide, &hotkeys.translate_selection))
+        .apply(&hotkeys.show_hide, &hotkeys.translate_selection);
+    if result.registered {
+        // Persist so the bindings are live from the first second of the next
+        // launch (improvement bug #5); failures are non-fatal.
+        let path = state.data_root.join(crate::hotkey::PERSISTENCE_FILENAME);
+        let saved = crate::hotkey::PersistedHotkeys {
+            show_hide: hotkeys.show_hide.clone(),
+            translate_selection: hotkeys.translate_selection.clone(),
+        };
+        if let Err(err) = crate::hotkey::save_persisted(&path, &saved) {
+            log_line(&format!("failed to persist hotkeys: {err}"));
+        }
+    }
+    Ok(result)
 }
 
 /// Maximum characters kept from `default_file_name` (frozen contract).

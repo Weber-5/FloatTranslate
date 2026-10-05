@@ -80,8 +80,8 @@ func TestAdapterStreamParsesReasoningAndContent(t *testing.T) {
 	if body["stream"] != true || body["temperature"] != 0.7 || body["model"] != "chat-model" {
 		t.Errorf("frozen stream request fields wrong: %v", body)
 	}
-	if _, present := body["enable_thinking"]; present {
-		t.Errorf("enable_thinking must be omitted when thinking=false: %s", gotBody)
+	if body["enable_thinking"] != false {
+		t.Errorf("enable_thinking must be explicit false when thinking=false: %s", gotBody)
 	}
 	msgs, _ := body["messages"].([]any)
 	if len(msgs) != 2 {
@@ -221,8 +221,8 @@ func TestAdapterChatCompletePlain(t *testing.T) {
 	if _, present := body["response_format"]; present {
 		t.Errorf("plain chat completion must not set response_format: %s", gotBody)
 	}
-	if _, present := body["enable_thinking"]; present {
-		t.Errorf("plain chat completion must not set enable_thinking: %s", gotBody)
+	if body["enable_thinking"] != false {
+		t.Errorf("plain chat completion must set enable_thinking=false explicitly: %s", gotBody)
 	}
 
 	// Error mapping matches the streaming surface.

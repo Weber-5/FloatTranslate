@@ -66,10 +66,10 @@ func (a *OpenAIAdapter) Stream(ctx context.Context, req StreamRequest, onDelta f
 		Stream:      true,
 		Temperature: 0.7,
 	}
-	if req.Thinking {
-		enable := true
-		body.EnableThinking = &enable
-	}
+	// Explicit in both directions: absent enable_thinking defaults to ON on
+	// hybrid-reasoning models, so "thinking off" must be sent as false.
+	enable := req.Thinking
+	body.EnableThinking = &enable
 	raw, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("encode stream request: %w", err)
@@ -168,6 +168,10 @@ func (a *OpenAIAdapter) ChatComplete(ctx context.Context, req ChatCompletionRequ
 		Stream:      false,
 		Temperature: 0.7,
 	}
+	// Compact summaries never need reasoning (docs/06 §11: thinking is a
+	// user-facing chat toggle only); explicit false keeps it fast.
+	enableThinking := false
+	body.EnableThinking = &enableThinking
 	content, err := a.postChat(ctx, body)
 	if err != nil {
 		return "", err

@@ -203,6 +203,47 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         hotkeys: hotkey::HotkeyManager::with_app_handle(handle.clone()),
     });
 
+    // --- runtime window icon (improvement bug #3) --------------------------
+    // The exe resource usually provides the window/taskbar icon, but a stale
+    // shell icon cache or a failed resource lookup leaves a blank tile in the
+    // taskbar. Setting the icon explicitly on the window removes that class
+    // of failure.
+    match tauri::image::Image::from_bytes(include_bytes!("../icons/icon.ico")) {
+        Ok(icon) => {
+            if let Err(err) = window.set_icon(icon) {
+                log_line(&format!("failed to set window icon: {err}"));
+            }
+        }
+        Err(err) => log_line(&format!("failed to decode window icon: {err}")),
+    }
+
+    // --- hotkey persistence (improvement bug #5) ----------------------------
+    // Hotkeys used to exist only after the frontend booted and applied the
+    // settings, so presses in the first seconds did nothing. The last applied
+    // bindings are persisted in the data root and re-applied here, before the
+    // webview loads; the frontend remains the runtime authority.
+    {
+        let state = handle.state::<AppState>();
+        let hotkeys_path = state.data_root.join(hotkey::PERSISTENCE_FILENAME);
+        if let Some(saved) = hotkey::load_persisted(&hotkeys_path) {
+            let result = state
+                .hotkeys
+                .apply(&saved.show_hide, &saved.translate_selection);
+            if result.registered {
+                log_line(&format!(
+                    "hotkeys restored from disk: show_hide={}, translate_selection={}",
+                    saved.show_hide, saved.translate_selection
+                ));
+            } else {
+                log_line(&format!(
+                    "persisted hotkeys failed to apply (conflict: {:?}); \
+                     waiting for the frontend to re-apply",
+                    result.conflict
+                ));
+            }
+        }
+    }
+
     tray::create_tray(&handle)?;
 
     Ok(())

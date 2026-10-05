@@ -63,8 +63,13 @@ func TestOpenAIAdapterCompleteRequestShape(t *testing.T) {
 	if m0["role"] != "system" || m1["role"] != "user" {
 		t.Errorf("message roles wrong: %v %v", m0, m1)
 	}
-	// No thinking/reasoning fields may be sent for translation.
-	for _, banned := range []string{"thinking", "reasoning", "reasoning_effort", "enable_thinking", "chat_template_kwargs"} {
+	// Translation must explicitly DISABLE thinking (improvement bug #1:
+	// absent enable_thinking defaults to ON on hybrid models). Other
+	// thinking/reasoning fields stay banned.
+	if body["enable_thinking"] != false {
+		t.Errorf("enable_thinking = %v, want explicit false", body["enable_thinking"])
+	}
+	for _, banned := range []string{"reasoning", "reasoning_effort", "chat_template_kwargs"} {
 		if strings.Contains(gotBody, banned) {
 			t.Errorf("request body must not contain %q: %s", banned, gotBody)
 		}

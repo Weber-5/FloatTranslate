@@ -19,7 +19,7 @@ import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '@/stores/settings'
 import { getBackendConfig } from '@/api'
 import { APP_VERSION } from '@/constants'
-import { checkForUpdate, type UpdateCheckResult } from '@/services/update'
+import { checkForUpdate, type LatestRelease } from '@/services/update'
 import { openLogsDir } from '@/services/native'
 import SettingRow from './SettingRow.vue'
 import IconExternal from '@/components/icons/IconExternal.vue'
@@ -42,12 +42,19 @@ function showNotice(message: string): void {
 
 const checking = ref(false)
 const updateError = ref<string | null>(null)
-const availableUpdate = ref<UpdateCheckResult | null>(null)
+/** The newer release when `update-available`; null otherwise. */
+const availableUpdate = ref<LatestRelease | null>(null)
 
-/** Demo hook: mock mode can simulate a newer release without any request. */
+/** Demo hook: mock mode can simulate a newer release without any request.
+ *  The simulated version is always one patch above the running version so
+ *  the banner stays demoable across releases. */
 const simulatedLatest = computed(() => {
   if (settings.mockMode && settings.app?.force_update_available === true) {
-    return { tag_name: 'v1.0.1', html_url: RELEASE_URL }
+    const [major, minor, patch] = APP_VERSION.split('.').map(Number)
+    return {
+      tag_name: `v${major}.${minor}.${(patch || 0) + 1}`,
+      html_url: RELEASE_URL,
+    }
   }
   return undefined
 })
@@ -58,8 +65,8 @@ async function runUpdateCheck(): Promise<void> {
   updateError.value = null
   try {
     const result = await checkForUpdate(APP_VERSION, simulatedLatest.value)
-    if (result.status === 'update-available') {
-      availableUpdate.value = result
+    if (result.status === 'update-available' && result.latest) {
+      availableUpdate.value = result.latest
       notice.value = null
     } else {
       availableUpdate.value = null
@@ -117,9 +124,9 @@ async function onOpenLogs(): Promise<void> {
       role="status"
       data-testid="update-banner"
     >
-      <span>{{ t('settings.about.updateAvailable', { version: availableUpdate.latest.tag_name }) }}</span>
+      <span>{{ t('settings.about.updateAvailable', { version: availableUpdate.tag_name }) }}</span>
       <a
-        :href="availableUpdate.latest.html_url ?? RELEASE_URL"
+        :href="availableUpdate.html_url ?? RELEASE_URL"
         target="_blank"
         rel="noopener noreferrer"
         class="update-link"
@@ -128,7 +135,7 @@ async function onOpenLogs(): Promise<void> {
         {{ t('settings.about.viewUpdate') }}
         <IconExternal :size="12" />
       </a>
-      <span class="release-url">{{ availableUpdate.latest.html_url ?? RELEASE_URL }}</span>
+      <span class="release-url">{{ availableUpdate.html_url ?? RELEASE_URL }}</span>
     </p>
 
     <p v-if="updateError" class="update-error" role="alert" data-testid="update-error">

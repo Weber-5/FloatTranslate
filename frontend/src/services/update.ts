@@ -25,7 +25,9 @@ export type UpdateCheckStatus = 'update-available' | 'up-to-date'
 
 export interface UpdateCheckResult {
   status: UpdateCheckStatus
-  latest: LatestRelease
+  /** Null when the repo has no published release yet (drafts are invisible
+   *  to /releases/latest) — treated as up-to-date, not an error. */
+  latest: LatestRelease | null
   /** compareSemver(latest, current): negative → latest older, 0 equal, positive newer. */
   comparison: number
 }
@@ -69,12 +71,14 @@ export function compareSemver(a: string, b: string): number {
 }
 
 /**
- * Fetches the latest stable release. Network/HTTP failures reject with
+ * Fetches the latest stable release. Returns null when the repo has no
+ * published release (HTTP 404 — draft releases are invisible to this
+ * endpoint; improvement bug #7). Other network/HTTP failures reject with
  * UpdateCheckError so the UI can offer a retry.
  */
 export async function fetchLatestRelease(
   fetchImpl: typeof fetch = fetch,
-): Promise<LatestRelease> {
+): Promise<LatestRelease | null> {
   let response: Response
   try {
     response = await fetchImpl(RELEASE_API_URL, {
@@ -83,6 +87,7 @@ export async function fetchLatestRelease(
   } catch {
     throw new UpdateCheckError('network error')
   }
+  if (response.status === 404) return null
   if (!response.ok) {
     throw new UpdateCheckError(`HTTP ${response.status}`)
   }
@@ -102,7 +107,8 @@ export async function fetchLatestRelease(
 /**
  * Compares the latest release against the running version. `simulatedLatest`
  * replaces the network call (mock mode: { tag_name: 'v1.0.1' } when the demo
- * flag is set, so no real request leaves the machine).
+ * flag is set, so no real request leaves the machine). No published release
+ * → up-to-date (never claims an update, never errors).
  */
 export async function checkForUpdate(
   currentVersion: string,
@@ -110,6 +116,9 @@ export async function checkForUpdate(
   fetchImpl: typeof fetch = fetch,
 ): Promise<UpdateCheckResult> {
   const latest = simulatedLatest ?? (await fetchLatestRelease(fetchImpl))
+  if (!latest) {
+    return { status: 'up-to-date', latest: null, comparison: 0 }
+  }
   const comparison = compareSemver(latest.tag_name, currentVersion)
   return {
     status: comparison > 0 ? 'update-available' : 'up-to-date',

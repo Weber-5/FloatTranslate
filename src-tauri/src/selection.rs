@@ -36,6 +36,10 @@ pub const POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// How long to keep retrying the initial clipboard snapshot before giving up
 /// on restoring (a busy clipboard must not abort the capture; docs/07 §5).
 pub const SNAPSHOT_RETRY_WINDOW: Duration = Duration::from_millis(300);
+/// Settle time before retrying the copy (improvement bug #5: some apps
+/// swallow the first simulated Ctrl+C — busy focus, IME, first-keystroke
+/// handling — so the copy is sent once more before giving up).
+pub const COPY_RETRY_DELAY: Duration = Duration::from_millis(150);
 
 /// Guards against overlapping captures (hotkey pressed twice).
 static CAPTURE_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
@@ -112,10 +116,14 @@ pub struct CaptureEngine<C: ClipboardText, T: CopyTrigger, K: CaptureClock> {
     timeout: Duration,
     poll: Duration,
     snapshot_retry: Duration,
+    /// How many times the simulated Ctrl+C is sent before giving up (bug #5).
+    copy_attempts: u32,
+    /// Settle delay between copy attempts.
+    retry_delay: Duration,
 }
 
 impl<C: ClipboardText, T: CopyTrigger, K: CaptureClock> CaptureEngine<C, T, K> {
-    /// Engine with the frozen 1.0 timings.
+    /// Engine with the frozen 1.0 timings (copy attempted twice).
     pub fn new(clipboard: C, trigger: T, clock: K) -> Self {
         Self {
             clipboard,
@@ -124,6 +132,8 @@ impl<C: ClipboardText, T: CopyTrigger, K: CaptureClock> CaptureEngine<C, T, K> {
             timeout: CAPTURE_TIMEOUT,
             poll: POLL_INTERVAL,
             snapshot_retry: SNAPSHOT_RETRY_WINDOW,
+            copy_attempts: 2,
+            retry_delay: COPY_RETRY_DELAY,
         }
     }
 
@@ -135,14 +145,26 @@ impl<C: ClipboardText, T: CopyTrigger, K: CaptureClock> CaptureEngine<C, T, K> {
         let snapshot = self.snapshot_text();
         let initial_sequence = self.clipboard.sequence();
 
-        // Step 3: simulate Ctrl+C.
-        let copy_result = self.trigger.send_copy();
-
-        // Steps 4+5: wait for the clipboard to update, then read the text.
-        let outcome = match copy_result {
+        // Steps 3+4+5: simulate Ctrl+C (retried when the first keystroke is
+        // swallowed) and wait for the clipboard to update, then read the text.
+        let mut copy_result = self.trigger.send_copy();
+        let mut outcome = match copy_result {
             Ok(()) => self.wait_for_update(initial_sequence, snapshot.as_deref()),
             Err(reason) => Err(CaptureError::CopyFailed(reason)),
         };
+        if outcome.is_err() {
+            for _ in 1..self.copy_attempts {
+                self.clock.sleep(self.retry_delay);
+                copy_result = self.trigger.send_copy();
+                outcome = match copy_result {
+                    Ok(()) => self.wait_for_update(initial_sequence, snapshot.as_deref()),
+                    Err(reason) => Err(CaptureError::CopyFailed(reason)),
+                };
+                if outcome.is_ok() {
+                    break;
+                }
+            }
+        }
 
         // Step 6: restore the original clipboard (best effort) on EVERY path.
         let mut restored = false;
@@ -599,8 +621,36 @@ mod tests {
         assert_eq!(result, Err(CaptureError::NoUpdate));
         assert_eq!(clipboard.text(), Some("old".to_string()));
         assert_eq!(clipboard.write_calls(), vec!["old".to_string()]);
-        // 1200ms timeout / 50ms poll, deadline checked before each sleep.
-        assert_eq!(state.clock.sleeps(), 24);
+        // Two copy attempts (bug #5 retry): 1200ms timeout / 50ms poll = 24
+        // sleeps each; the MockClock retry settle is ONE sleep call (150ms).
+        assert_eq!(state.clock.sleeps(), 49);
+    }
+
+    #[test]
+    fn retries_the_copy_when_the_first_keystroke_is_swallowed() {
+        let clipboard = Arc::new(MockClipboard::with_text("old"));
+        // First send_copy produces nothing; the second one copies.
+        let result = engine(
+            clipboard.clone(),
+            vec![MockAction::Nothing, MockAction::Copy("late")],
+        )
+        .capture();
+        assert_eq!(
+            result,
+            Ok(CaptureOutcome {
+                text: "late".to_string(),
+                restored: true,
+            })
+        );
+        assert_eq!(clipboard.text(), Some("old".to_string()));
+    }
+
+    #[test]
+    fn no_update_after_retry_reports_timeout() {
+        let clipboard = Arc::new(MockClipboard::with_text("old"));
+        let result = engine(clipboard.clone(), vec![MockAction::Nothing]).capture();
+        assert_eq!(result, Err(CaptureError::NoUpdate));
+        assert_eq!(clipboard.text(), Some("old".to_string()));
     }
 
     #[test]
@@ -644,9 +694,12 @@ mod tests {
     }
 
     #[test]
-    fn copy_failure_aborts_and_still_tries_restore() {
+    fn copy_failure_is_retried_then_reported_with_restore_attempted() {
         let clipboard = Arc::new(MockClipboard::with_text("old"));
-        let result = engine(clipboard.clone(), vec![MockAction::Fail]).capture();
+        // Bug #5: even a SendInput failure gets one retry (transient OS-level
+        // copy failures happen); only when BOTH attempts fail does the error
+        // surface — and the restore is still attempted.
+        let result = engine(clipboard.clone(), vec![MockAction::Fail, MockAction::Fail]).capture();
         assert_eq!(
             result,
             Err(CaptureError::CopyFailed(
@@ -655,6 +708,24 @@ mod tests {
         );
         assert_eq!(clipboard.text(), Some("old".to_string()));
         assert_eq!(clipboard.write_calls(), vec!["old".to_string()]);
+    }
+
+    #[test]
+    fn copy_failure_recovers_on_the_retry() {
+        let clipboard = Arc::new(MockClipboard::with_text("old"));
+        // First send fails (transient), the retry copies successfully.
+        let result = engine(
+            clipboard.clone(),
+            vec![MockAction::Fail, MockAction::Copy("recovered")],
+        )
+        .capture();
+        assert_eq!(
+            result,
+            Ok(CaptureOutcome {
+                text: "recovered".to_string(),
+                restored: true,
+            })
+        );
     }
 
     #[test]
