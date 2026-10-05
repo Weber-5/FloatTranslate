@@ -374,6 +374,17 @@ pub async fn pick_open_path(
 
 // --- Phase 5: OS integration (autostart / window / logs) --------------------
 
+/// Current sidecar status for the frontend ("starting"|"ready"|"restarting"|
+/// "failed"). The `backend-status` Tauri event can fire BEFORE the webview
+/// attaches its listener (a missing sidecar fails within milliseconds),
+/// which left the health gate stuck on "starting" forever; polling the
+/// snapshot at listener-attach time closes that race (improvement: portable
+/// without a sidecar showed "启动中" eternally).
+#[tauri::command]
+pub fn get_backend_status(state: State<'_, AppState>) -> String {
+    state.backend.snapshot().status.as_str().to_string()
+}
+
 /// Minimizes the main window (titlebar minimize button).
 #[tauri::command]
 pub fn minimize_window(app: AppHandle) -> Result<(), String> {

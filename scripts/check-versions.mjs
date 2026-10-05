@@ -102,6 +102,15 @@ found.push(['src-tauri/tauri.conf.json (source of truth)', appVersion]);
   else found.push(['src-tauri/Cargo.toml [package] version', version]);
 }
 
+// backend/internal/config/config.go -> DefaultVersion
+{
+  const m = read('backend', 'internal', 'config', 'config.go').match(
+    /DefaultVersion\s*=\s*"([^"]+)"/,
+  );
+  if (!m) errors.push('backend/internal/config/config.go: DefaultVersion not found');
+  else found.push(['backend/internal/config/config.go DefaultVersion', m[1]]);
+}
+
 // Compare everything against the source of truth.
 for (const [name, version] of found) {
   if (version !== appVersion) {

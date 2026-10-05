@@ -137,7 +137,7 @@ func TestHealthNoAuth(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("health status = %d, want 200", status)
 	}
-	if body["status"] != "ready" || body["version"] != "1.0.0" || body["db_status"] != "ok" {
+	if body["status"] != "ready" || body["version"] != config.DefaultVersion || body["db_status"] != "ok" {
 		t.Errorf("health body = %v", body)
 	}
 }

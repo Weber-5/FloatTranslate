@@ -4,7 +4,7 @@
 //   - binds 127.0.0.1 only, port from FT_HTTP_PORT ("0" = ephemeral)
 //   - opens SQLite, applies migrations (any failure aborts startup)
 //   - after listening prints EXACTLY ONE JSON line to stdout:
-//     {"status":"ready","port":<actual port>,"version":"1.0.0"}
+//     {"status":"ready","port":<actual port>,"version":"<config.DefaultVersion>"}
 //     which the Tauri host parses. All logging goes to stderr and log files.
 package main
 

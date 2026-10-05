@@ -1,4 +1,5 @@
 param(
+  [string]$ProcessName = 'FloatTranslate*',
   [string]$OutPath = 'E:\wwb\Translater\dist\e2e-window.png'
 )
 Add-Type @'
@@ -11,7 +12,8 @@ public class FTWin32 {
 }
 '@
 Add-Type -AssemblyName System.Drawing
-$p = Get-Process floattranslate -ErrorAction Stop
+$p = Get-Process | Where-Object { $_.ProcessName -like $ProcessName } | Select-Object -First 1
+if (-not $p) { throw "no process like $ProcessName found" }
 $h = $p.MainWindowHandle
 [FTWin32]::SetForegroundWindow($h) | Out-Null
 Start-Sleep -Milliseconds 800

@@ -123,9 +123,18 @@ export const useBackendStore = defineStore('backend', () => {
   async function listenHostEvents(): Promise<void> {
     if (isMockMode()) return
     try {
-      const { listen } = await import('@tauri-apps/api/event')
+      const [{ listen }, { invoke }] = await Promise.all([
+        import('@tauri-apps/api/event'),
+        import('@tauri-apps/api/core'),
+      ])
       await listen<unknown>('backend-status', (event) => applyHostEvent('backend-status', event.payload))
       await listen<unknown>('backend-failed', () => applyHostEvent('backend-failed', null))
+      // The sidecar can fail BEFORE this listener attaches (the webview takes
+      // seconds to boot; a missing backend fails instantly), so the missed
+      // event is healed by reading the current snapshot once (improvement:
+      // the gate used to stay on "启动中" forever).
+      const snapshot = await invoke<string>('get_backend_status')
+      if (snapshot !== 'starting') applyHostEvent('backend-status', snapshot)
     } catch {
       // Event API not available yet (host wiring lands in Phase 3/5) — the
       // manual probe/retry loop still drives the same gate.

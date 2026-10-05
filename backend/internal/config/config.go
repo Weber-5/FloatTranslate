@@ -35,7 +35,9 @@ const (
 	envDataRoot     = "FT_DATA_ROOT"
 
 	// DefaultVersion is reported by /health and the startup ready line.
-	DefaultVersion = "1.0.0"
+	// Keep in sync with src-tauri/tauri.conf.json (scripts/check-versions.mjs
+	// asserts this file carries the same string).
+	DefaultVersion = "1.0.1"
 )
 
 // Load reads configuration from the process environment and applies defaults.

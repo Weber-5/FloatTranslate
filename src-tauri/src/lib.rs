@@ -106,6 +106,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_backend_config,
+            commands::get_backend_status,
             commands::apply_hotkeys,
             commands::export_markdown,
             commands::pick_save_path,
