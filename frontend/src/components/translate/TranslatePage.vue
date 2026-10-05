@@ -17,7 +17,6 @@ import { useTranslationStore } from '@/stores/translation'
 import TranslateInput from './TranslateInput.vue'
 import WordResult from './WordResult.vue'
 import TextResult from './TextResult.vue'
-import AskAiButton from './AskAiButton.vue'
 import LoadingState from '@/components/common/LoadingState.vue'
 import StateBanner from '@/components/common/StateBanner.vue'
 
@@ -66,13 +65,6 @@ function onRetry(): void {
 function goToSettings(): void {
   void router.push({ path: '/settings', query: { section: 'provider' } })
 }
-
-function askText(): string {
-  if (!response.value) return ''
-  const result = response.value.result
-  if ('lemma' in result) return result.word
-  return result.source_markdown
-}
 </script>
 
 <template>
@@ -112,9 +104,6 @@ function askText(): string {
       <template v-else-if="response">
         <WordResult v-if="isWord" :response="response" />
         <TextResult v-else :response="response" />
-        <div class="page-ask">
-          <AskAiButton :text="askText()" />
-        </div>
       </template>
     </template>
   </section>
@@ -127,11 +116,6 @@ function askText(): string {
   flex-direction: column;
   gap: var(--space-4);
   min-height: 100%;
-}
-
-.page-ask {
-  display: flex;
-  justify-content: center;
 }
 
 .banner-cta {

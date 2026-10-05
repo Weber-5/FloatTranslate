@@ -15,6 +15,7 @@ import { useTranslationStore } from '@/stores/translation'
 import { copyText } from '@/services/clipboard'
 import { tokenizeParagraph } from '@/lib/tokenize'
 import { lemmatize } from '@/lib/lemmatize'
+import AskAiButton from './AskAiButton.vue'
 
 const props = defineProps<{ response: TranslationResponse }>()
 
@@ -22,6 +23,9 @@ const { t } = useI18n()
 const translationStore = useTranslationStore()
 
 const segments = computed(() => (props.response.result as TextTranslation).segments)
+
+/** Ask AI carries the source text (docs/06 §12), same as the word path. */
+const askText = computed(() => (props.response.result as TextTranslation).source_markdown)
 
 const copiedIndex = ref<number | null>(null)
 const copiedAll = ref(false)
@@ -57,14 +61,17 @@ function onTokenClick(tokenText: string): void {
   <section class="text-result">
     <div class="text-toolbar">
       <p class="click-hint">{{ t('text.clickHint') }}</p>
-      <button
-        type="button"
-        class="btn btn-ghost copy-btn"
-        data-testid="text-copy-all"
-        @click="copyWhole"
-      >
-        {{ copiedAll ? t('text.copied') : t('text.copyAll') }}
-      </button>
+      <div class="toolbar-actions">
+        <button
+          type="button"
+          class="btn btn-ghost copy-btn"
+          data-testid="text-copy-all"
+          @click="copyWhole"
+        >
+          {{ copiedAll ? t('text.copied') : t('text.copyAll') }}
+        </button>
+        <AskAiButton :text="askText" />
+      </div>
     </div>
     <div v-for="(segment, index) in segments" :key="index" class="text-pair card">
       <p class="pair-source" lang="en">
@@ -117,6 +124,13 @@ function onTokenClick(tokenText: string): void {
 .click-hint {
   font-size: 12px;
   color: var(--text-tertiary);
+}
+
+.toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: none;
 }
 
 .copy-btn {
