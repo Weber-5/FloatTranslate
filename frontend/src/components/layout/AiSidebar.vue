@@ -4,8 +4,8 @@
  * Markdown + collapsible reasoning, composer with Enter send / Shift+Enter
  * newline, thinking toggle, slash command picker (/compact /clear /context
  * /export), reference chip for Ask AI, regenerate on the last assistant
- * message and send / stop swap during streaming.
- * Phase 4: streams into the DOM through the store's dedicated buffers.
+ * message and send / stop swap during streaming. Deltas stream into the DOM
+ * through the store's dedicated buffers (no full-list re-render per token).
  */
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'

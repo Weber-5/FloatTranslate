@@ -372,8 +372,11 @@ pub(crate) fn start_capture(app: AppHandle) {
     let spawned = std::thread::Builder::new()
         .name("floattranslate-selection-capture".to_string())
         .spawn(move || {
+            // improvement bug #5: the single-flight flag is released by a drop
+            // guard, so a panic inside the capture can never leave the hotkey
+            // permanently dead for the rest of the session.
+            let _guard = CaptureInProgressGuard;
             let result = run_capture();
-            CAPTURE_IN_PROGRESS.store(false, Ordering::SeqCst);
             match result {
                 Ok(outcome) => {
                     if !outcome.restored {
@@ -406,6 +409,16 @@ fn run_capture() -> Result<CaptureOutcome, CaptureError> {
     CaptureEngine::new(WindowsClipboard, CtrlCTrigger, StdClock::new()).capture()
 }
 
+/// Releases the single-flight flag when the capture worker unwinds — on a
+/// normal return, an early return or a panic.
+struct CaptureInProgressGuard;
+
+impl Drop for CaptureInProgressGuard {
+    fn drop(&mut self) {
+        CAPTURE_IN_PROGRESS.store(false, Ordering::SeqCst);
+    }
+}
+
 #[cfg(not(windows))]
 fn run_capture() -> Result<CaptureOutcome, CaptureError> {
     Err(CaptureError::CopyFailed(
@@ -418,6 +431,13 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
     use std::sync::{Arc, Mutex};
+
+    /// The two `FT_SELECTION_E2E` tests share the one real OS clipboard, and
+    /// Rust runs tests in parallel: without serialisation the round-trip test's
+    /// writes bump the sequence number between the read-only probe's two reads,
+    /// failing its "reading must not change the sequence" assertion at random.
+    /// Poisoning is tolerated so one failure cannot cascade.
+    static CLIPBOARD_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     // ------------------------------------------------------------------
     // Mocks
@@ -798,6 +818,9 @@ mod tests {
         if std::env::var("FT_SELECTION_E2E").ok().as_deref() != Some("1") {
             return; // gate: run only when explicitly requested
         }
+        let _serial = CLIPBOARD_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let clipboard = WindowsClipboard;
         let text = clipboard.read();
         log_line(&format!(
@@ -826,6 +849,9 @@ mod tests {
         if std::env::var("FT_SELECTION_E2E").ok().as_deref() != Some("1") {
             return; // gate: run only when explicitly requested
         }
+        let _serial = CLIPBOARD_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let clipboard = WindowsClipboard;
         let original = clipboard.read();
 
@@ -847,21 +873,27 @@ mod tests {
             Some("FloatTranslate E2E guard")
         );
 
-        // Phase 2: real SendInput Ctrl+C. Without a selection target this
-        // times out; the guard text must survive either way.
-        let engine = CaptureEngine::new(clipboard, CtrlCTrigger, StdClock::new());
-        match engine.capture() {
-            Ok(outcome) => log_line(&format!(
-                "E2E: real Ctrl+C captured {} chars",
-                outcome.text.chars().count()
-            )),
-            Err(CaptureError::NoUpdate) => {}
-            Err(err) => panic!("unexpected E2E error: {err}"),
+        // Phase 2: real SendInput Ctrl+C. Kept behind its OWN opt-in
+        // (`FT_SELECTION_SENDINPUT=1`) because it types Ctrl+C into whatever
+        // window currently has focus — a routine test run must never do that
+        // (a focused terminal would receive SIGINT). Without a selection
+        // target it simply times out, and the guard text must survive either
+        // way.
+        if std::env::var("FT_SELECTION_SENDINPUT").ok().as_deref() == Some("1") {
+            let engine = CaptureEngine::new(clipboard, CtrlCTrigger, StdClock::new());
+            match engine.capture() {
+                Ok(outcome) => log_line(&format!(
+                    "E2E: real Ctrl+C captured {} chars",
+                    outcome.text.chars().count()
+                )),
+                Err(CaptureError::NoUpdate) => {}
+                Err(err) => panic!("unexpected E2E error: {err}"),
+            }
+            assert_eq!(
+                clipboard.read().as_deref(),
+                Some("FloatTranslate E2E guard")
+            );
         }
-        assert_eq!(
-            clipboard.read().as_deref(),
-            Some("FloatTranslate E2E guard")
-        );
 
         // Give the user their clipboard back (best effort).
         match original {
@@ -872,5 +904,18 @@ mod tests {
                 let _ = clipboard.write("");
             }
         }
+    }
+
+    /// improvement bug #5: the single-flight flag must be released when the
+    /// worker scope ends — otherwise one stuck capture would swallow every
+    /// later Ctrl+Alt+Q for the rest of the session.
+    #[test]
+    fn capture_in_progress_guard_clears_the_flag() {
+        CAPTURE_IN_PROGRESS.store(true, Ordering::SeqCst);
+        {
+            let _guard = CaptureInProgressGuard;
+            assert!(CAPTURE_IN_PROGRESS.load(Ordering::SeqCst));
+        }
+        assert!(!CAPTURE_IN_PROGRESS.load(Ordering::SeqCst));
     }
 }

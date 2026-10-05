@@ -113,7 +113,12 @@ if (-not $ChecksumsOnly) {
 }
 
 if ($Checksums -or $ChecksumsOnly) {
-    $assets = Get-ChildItem $DistDir -Include '*.exe', '*.zip' -Recurse -Depth 0 | Sort-Object Name
+    # Top-level files only: a recursive glob used to pull stray files out of
+    # dist subdirectories (leftover smoke/test copies) into the release
+    # checksums.
+    $assets = Get-ChildItem $DistDir -File |
+        Where-Object { $_.Extension -in '.exe', '.zip' } |
+        Sort-Object Name
     if (-not $assets) { throw "no .exe/.zip assets in $DistDir to checksum" }
     $lines = foreach ($asset in $assets) {
         $hash = (Get-FileHash -Path $asset.FullName -Algorithm SHA256).Hash.ToLowerInvariant()

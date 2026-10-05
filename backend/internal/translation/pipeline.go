@@ -608,6 +608,12 @@ func (p *Pipeline) completeAndDecode(ctx context.Context, e *runEnv, kind,
 	if verr == nil {
 		return payload, raw.Content, nil
 	}
+	// Diagnostic (improvement bug #1): a repair means TWO provider calls for a
+	// single translation, doubling the latency the user perceives. Only counts
+	// are logged — never the model output or the validation detail (both can
+	// echo user/model content).
+	slog.WarnContext(ctx, "translation output failed schema validation; issuing one repair request",
+		slog.String("kind", kind), slog.Int("raw_chars", len([]rune(raw.Content))))
 	repair, rerr := e.provider.Complete(ctx, llm.CompleteRequest{
 		Model:        e.model,
 		Kind:         kind,
@@ -622,6 +628,7 @@ func (p *Pipeline) completeAndDecode(ctx context.Context, e *runEnv, kind,
 	}
 	payload, verr = validateAndDecode(schema, repair.Content)
 	if verr != nil {
+		slog.WarnContext(ctx, "repair request also failed schema validation", slog.String("kind", kind))
 		return nil, "", verr
 	}
 	return payload, repair.Content, nil

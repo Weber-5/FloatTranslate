@@ -21,12 +21,13 @@ export interface LatestRelease {
   name?: string
 }
 
-export type UpdateCheckStatus = 'update-available' | 'up-to-date'
+export type UpdateCheckStatus = 'update-available' | 'up-to-date' | 'no-release'
 
 export interface UpdateCheckResult {
   status: UpdateCheckStatus
   /** Null when the repo has no published release yet (drafts are invisible
-   *  to /releases/latest) — treated as up-to-date, not an error. */
+   *  to /releases/latest) — reported as `no-release`, never as an error and
+   *  never as a false "up to date" (improvement bug #7). */
   latest: LatestRelease | null
   /** compareSemver(latest, current): negative → latest older, 0 equal, positive newer. */
   comparison: number
@@ -107,8 +108,11 @@ export async function fetchLatestRelease(
 /**
  * Compares the latest release against the running version. `simulatedLatest`
  * replaces the network call (mock mode: { tag_name: 'v1.0.1' } when the demo
- * flag is set, so no real request leaves the machine). No published release
- * → up-to-date (never claims an update, never errors).
+ * flag is set, so no real request leaves the machine).
+ *
+ * No published release (HTTP 404, or a repo that is not public yet) is its own
+ * outcome: reporting "up to date" there would claim a comparison that never
+ * happened (improvement bug #7).
  */
 export async function checkForUpdate(
   currentVersion: string,
@@ -117,7 +121,7 @@ export async function checkForUpdate(
 ): Promise<UpdateCheckResult> {
   const latest = simulatedLatest ?? (await fetchLatestRelease(fetchImpl))
   if (!latest) {
-    return { status: 'up-to-date', latest: null, comparison: 0 }
+    return { status: 'no-release', latest: null, comparison: 0 }
   }
   const comparison = compareSemver(latest.tag_name, currentVersion)
   return {

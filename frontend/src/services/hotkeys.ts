@@ -8,7 +8,7 @@
  * In mock mode (pure browser dev) the registration is simulated: it always
  * succeeds unless one hotkey equals the other one (a self-conflict).
  */
-import { isMockMode, isTauri } from '@/api'
+import { initApi, isMockMode, isTauri } from '@/api'
 import { DEFAULT_HOTKEY_QUICK_TRANSLATE, DEFAULT_HOTKEY_TOGGLE } from '@/constants'
 import { useSettingsStore } from '@/stores/settings'
 
@@ -87,14 +87,31 @@ export async function applyHotkeys(hotkeys: HotkeyPair): Promise<HotkeyApplyResu
 /**
  * Real-mode boot step (frozen sequence): after health is ready and settings
  * are loaded, register the hotkeys stored in the Go settings.
+ *
+ * improvement bug #5: the host can report READY *before* the API client is
+ * resolved (the already-running sidecar wins the race against the webview), and
+ * `backend.ready` then flips synchronously. Loading settings at that moment
+ * threw "API client not initialized", left `settings.app` null and returned
+ * silently — so on a fresh install the boot hotkeys were NEVER registered and
+ * `hotkeys.json` was never written. Waiting for the client first removes the
+ * race: whether the READY event or `initApi()` wins no longer matters.
  */
 export async function registerHotkeysFromSettings(): Promise<HotkeyApplyResult | null> {
+  try {
+    await initApi()
+  } catch {
+    return null
+  }
   const settings = useSettingsStore()
   if (settings.status !== 'success') {
     await settings.load()
   }
   const app = settings.app
-  if (!app) return null
+  if (!app) {
+    // Visible on purpose: a silent null here is what hid the bug above.
+    console.error('registerHotkeysFromSettings: app settings unavailable')
+    return null
+  }
   return applyHotkeys({
     show_hide: app.hotkey_toggle_window ?? DEFAULT_HOTKEY_TOGGLE,
     translate_selection: app.hotkey_quick_translate ?? DEFAULT_HOTKEY_QUICK_TRANSLATE,

@@ -145,7 +145,7 @@ function askText(): string {
           :key="synonym"
           type="button"
           class="chip"
-          :aria-label="`${t('translate.emptyTitle')}：${synonym}`"
+          :aria-label="`${t('word.synonyms')}：${synonym}`"
           data-testid="synonym-chip"
           @click="onSynonym(synonym)"
         >

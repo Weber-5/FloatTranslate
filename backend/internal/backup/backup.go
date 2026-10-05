@@ -23,8 +23,10 @@ import (
 // rejects files with a HIGHER version (BACKUP_VERSION_UNSUPPORTED).
 const SchemaVersion = 1
 
-// AppVersion is stamped into every export.
-const AppVersion = "1.0.0"
+// AppVersion is stamped into every export. Keep it in sync with the released
+// app version (config.DefaultVersion); the API export test compares against
+// this constant so the two can never drift apart silently.
+const AppVersion = "1.0.2"
 
 // Errors surfaced by Validate/ReadFile; the API layer maps them to
 // INVALID_REQUEST / BACKUP_VERSION_UNSUPPORTED envelopes.

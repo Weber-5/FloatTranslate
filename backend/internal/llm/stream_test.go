@@ -83,6 +83,13 @@ func TestAdapterStreamParsesReasoningAndContent(t *testing.T) {
 	if body["enable_thinking"] != false {
 		t.Errorf("enable_thinking must be explicit false when thinking=false: %s", gotBody)
 	}
+	// Chat keeps the conservative shape on purpose: the extra
+	// thinking-suppression dialects are only for translation/compact calls,
+	// where no vendor-specific 400 fallback risk is acceptable on the live
+	// chat stream.
+	if strings.Contains(gotBody, `"thinking"`) || strings.Contains(gotBody, `"chat_template_kwargs"`) {
+		t.Errorf("chat stream must not carry the translation-only dialects: %s", gotBody)
+	}
 	msgs, _ := body["messages"].([]any)
 	if len(msgs) != 2 {
 		t.Errorf("messages = %d, want 2", len(msgs))

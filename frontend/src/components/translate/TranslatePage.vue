@@ -14,7 +14,9 @@ import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import { useTabsStore } from '@/stores/tabs'
 import { useTranslationStore } from '@/stores/translation'
+import type { TranslationResponse } from '@/api/types'
 import TranslateInput from './TranslateInput.vue'
+import QuickTranslateInput from './QuickTranslateInput.vue'
 import WordResult from './WordResult.vue'
 import TextResult from './TextResult.vue'
 import LoadingState from '@/components/common/LoadingState.vue'
@@ -52,10 +54,28 @@ const errorState = computed(() =>
 const showRetry = computed(() => errorState.value?.retryable === true)
 const showProviderCta = computed(() => errorState.value?.code === 'PROVIDER_NOT_CONFIGURED')
 
-/** Retry for a pure failure (no result yet) re-runs the input translation. */
+/** The source text a response was produced from (word or text result). */
+function responseSource(response: TranslationResponse): string {
+  return 'lemma' in response.result ? response.result.word : response.result.source_markdown
+}
+
+/**
+ * Retry for a pure failure (no result yet) re-runs the input translation; when
+ * the visible result IS the failed request's own source it retranslates it
+ * (bypassing the cache).
+ *
+ * A failed inline lookup (improvement bug #8) leaves a NEW input next to the
+ * OLD result, so retrying must send the typed text again instead of re-running
+ * the previous translation id.
+ */
 function onRetry(): void {
   if (!tab.value || !state.value) return
-  if (response.value) {
+  const current = response.value
+  const retrySameResult =
+    current !== null &&
+    current.translation_id.length > 0 &&
+    state.value.input.trim() === responseSource(current).trim()
+  if (retrySameResult) {
     void translationStore.retranslate(tab.value.id)
   } else {
     void translationStore.translate(tab.value.id)
@@ -102,6 +122,9 @@ function goToSettings(): void {
       <TranslateInput v-else-if="showInput" :tab-id="tab.id" />
 
       <template v-else-if="response">
+        <!-- improvement bug #8: look the next word up in place, right above
+             the result, instead of opening another tab. -->
+        <QuickTranslateInput :tab-id="tab.id" />
         <WordResult v-if="isWord" :response="response" />
         <TextResult v-else :response="response" />
       </template>

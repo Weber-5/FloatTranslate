@@ -2,7 +2,8 @@
 /**
  * Ask AI: creates a NEW chat, opens the AI Sidebar and prefills the composer
  * with the current word/text as a reference (docs/00 §7 / docs/06 §12).
- * Sending stays user-triggered (real streaming arrives in Phase 4).
+ * Sending stays user-triggered: the composer only prefills, the SSE stream
+ * starts when the user presses send.
  */
 import { useI18n } from 'vue-i18n'
 import { useChatsStore } from '@/stores/chats'

@@ -492,6 +492,84 @@ fn ensure_logs_dir(data_root: &Path) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+/// Maximum accepted length of an external URL (defensive bound, frozen).
+const MAX_EXTERNAL_URL_LEN: usize = 2048;
+
+/// Opens an external `http(s)` URL in the user's default browser.
+///
+/// improvement bug #7: the packaged WebView suppresses `target="_blank"`
+/// new-window requests (wry answers them with `SetHandled(true)` whenever no
+/// new-window handler is installed, which is Tauri's default), so the
+/// "查看更新" / GitHub links did nothing at all. Links are now routed through
+/// this command.
+///
+/// Only absolute `http://` / `https://` URLs without whitespace, quotes or
+/// control characters are accepted (docs/08 §2: no scheme smuggling); the URL
+/// travels to the shell as a single argument, never through `cmd`.
+#[tauri::command]
+pub fn open_external_url(url: String) -> Result<(), String> {
+    let url = validate_external_url(&url)?;
+    open_url_in_browser(&url).map_err(|err| format!("failed to open {url}: {err}"))
+}
+
+/// Validates an external URL and returns its trimmed form.
+///
+/// Rejects non-http(s) schemes (`file:`, `javascript:`, custom handlers),
+/// empty input, over-long input and anything containing whitespace, quotes or
+/// control characters.
+fn validate_external_url(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if !(trimmed.starts_with("http://") || trimmed.starts_with("https://")) {
+        return Err("only http:// and https:// URLs can be opened".to_string());
+    }
+    if trimmed.len() > MAX_EXTERNAL_URL_LEN {
+        return Err(format!("url exceeds {MAX_EXTERNAL_URL_LEN} characters"));
+    }
+    if trimmed
+        .chars()
+        .any(|c| c.is_whitespace() || c.is_control() || c == '"' || c == '\'')
+    {
+        return Err("url contains whitespace, quotes or control characters".to_string());
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Hands the URL to the Windows shell (ShellExecuteW "open"). Returns an error
+/// when the shell reports a failure code (<= 32) or the platform is not
+/// Windows.
+#[cfg(windows)]
+fn open_url_in_browser(url: &str) -> Result<(), String> {
+    use windows::core::PCWSTR;
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let operation: Vec<u16> = "open\0".encode_utf16().collect();
+    let target: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: both UTF-16 buffers are NUL-terminated and outlive the call;
+    // ShellExecuteW only reads them.
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            PCWSTR(operation.as_ptr()),
+            PCWSTR(target.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    // "If the function succeeds, it returns a value greater than 32."
+    if result.0 as isize <= 32 {
+        return Err(format!("shell execute returned {}", result.0 as isize));
+    }
+    Ok(())
+}
+
+/// Non-Windows placeholder: FloatTranslate 1.0 is Windows-only.
+#[cfg(not(windows))]
+fn open_url_in_browser(_url: &str) -> Result<(), String> {
+    Err("opening external URLs is only supported on Windows".to_string())
+}
+
 /// Opens `path` in the OS file manager (Windows: Explorer). Best-effort:
 /// spawn failures are logged, never propagated.
 fn open_in_file_manager(path: &Path) {
@@ -809,5 +887,60 @@ mod tests {
 
         let err = ensure_logs_dir(&blocker).unwrap_err();
         assert!(err.contains("failed to create logs directory"), "{err}");
+    }
+
+    // ---- open_external_url (improvement bug #7) --------------------------
+
+    #[test]
+    fn external_url_accepts_http_and_https() {
+        assert_eq!(
+            validate_external_url("https://github.com/Weber-5/FloatTranslate/releases/latest")
+                .unwrap(),
+            "https://github.com/Weber-5/FloatTranslate/releases/latest"
+        );
+        assert_eq!(
+            validate_external_url("  http://127.0.0.1:8080/x?y=1&z=2  ").unwrap(),
+            "http://127.0.0.1:8080/x?y=1&z=2"
+        );
+    }
+
+    #[test]
+    fn external_url_rejects_other_schemes() {
+        for raw in [
+            "",
+            "   ",
+            "file:///C:/Windows/System32/calc.exe",
+            "javascript:alert(1)",
+            "vbscript:msgbox",
+            "ms-settings:",
+            "github.com/Weber-5/FloatTranslate",
+            "//evil.example.com",
+        ] {
+            assert!(
+                validate_external_url(raw).is_err(),
+                "{raw:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn external_url_rejects_whitespace_quotes_and_control_characters() {
+        for raw in [
+            "https://example.com/a b",
+            "https://example.com/\"quoted\"",
+            "https://example.com/a\nb",
+            "https://example.com/a\u{0}b",
+        ] {
+            assert!(
+                validate_external_url(raw).is_err(),
+                "{raw:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn external_url_rejects_over_long_input() {
+        let long = format!("https://example.com/{}", "a".repeat(MAX_EXTERNAL_URL_LEN));
+        assert!(validate_external_url(&long).is_err());
     }
 }

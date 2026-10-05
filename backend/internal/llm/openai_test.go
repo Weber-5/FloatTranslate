@@ -63,19 +63,94 @@ func TestOpenAIAdapterCompleteRequestShape(t *testing.T) {
 	if m0["role"] != "system" || m1["role"] != "user" {
 		t.Errorf("message roles wrong: %v %v", m0, m1)
 	}
-	// Translation must explicitly DISABLE thinking (improvement bug #1:
-	// absent enable_thinking defaults to ON on hybrid models). Other
-	// thinking/reasoning fields stay banned.
+	// Translation must explicitly DISABLE thinking in EVERY dialect we know of
+	// (improvement bug #1): `enable_thinking` is only the Qwen/DashScope style,
+	// while DeepSeek's own API and vLLM-served hybrids use the other two. A
+	// model that keeps thinking ON turns a one-word lookup into a multi-second
+	// call.
 	if body["enable_thinking"] != false {
 		t.Errorf("enable_thinking = %v, want explicit false", body["enable_thinking"])
 	}
-	for _, banned := range []string{"reasoning", "reasoning_effort", "chat_template_kwargs"} {
+	thinking, ok := body["thinking"].(map[string]any)
+	if !ok || thinking["type"] != "disabled" {
+		t.Errorf("thinking disable dialect missing/wrong: %v", body["thinking"])
+	}
+	ctk, ok := body["chat_template_kwargs"].(map[string]any)
+	if !ok || ctk["thinking"] != false {
+		t.Errorf("chat_template_kwargs disable dialect missing/wrong: %v", body["chat_template_kwargs"])
+	}
+	// No field that could *enable* or grow reasoning.
+	for _, banned := range []string{"reasoning_effort", `"reasoning"`, "include_reasoning"} {
 		if strings.Contains(gotBody, banned) {
 			t.Errorf("request body must not contain %q: %s", banned, gotBody)
 		}
 	}
 	if resp.Content != `{"word":"run"}` {
 		t.Errorf("content = %q", resp.Content)
+	}
+}
+
+// A strict OpenAI-compatible endpoint may answer 400 for fields it does not
+// know. The translation must still succeed: retry once without the optional
+// dialects, keeping the explicit enable_thinking=false.
+func TestCompleteRetriesWithoutOptionalThinkingDialectsOn400(t *testing.T) {
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(raw))
+		if len(bodies) == 1 {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"message":"Unrecognized request argument supplied: thinking"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"word\":\"run\"}"}}]}`))
+	}))
+	defer srv.Close()
+
+	adapter := NewOpenAIAdapter(AdapterConfig{BaseURL: srv.URL, APIKey: "k"})
+	resp, err := adapter.Complete(context.Background(), CompleteRequest{Model: "m"})
+	if err != nil {
+		t.Fatalf("complete after fallback: %v", err)
+	}
+	if len(bodies) != 2 {
+		t.Fatalf("provider calls = %d, want 2 (original + fallback)", len(bodies))
+	}
+	if !strings.Contains(bodies[0], `"chat_template_kwargs"`) {
+		t.Errorf("first attempt should carry the dialects: %s", bodies[0])
+	}
+	if strings.Contains(bodies[1], `"thinking"`) || strings.Contains(bodies[1], `"chat_template_kwargs"`) {
+		t.Errorf("fallback attempt must drop the optional dialects: %s", bodies[1])
+	}
+	if !strings.Contains(bodies[1], `"enable_thinking":false`) {
+		t.Errorf("fallback must keep explicit enable_thinking=false: %s", bodies[1])
+	}
+	if resp.Content != `{"word":"run"}` {
+		t.Errorf("content = %q", resp.Content)
+	}
+}
+
+// Providers that ignore the suppression return the chain of thought in
+// reasoning_content; the payload must still be parsed (and the diagnostic must
+// not change the result).
+func TestCompleteToleratesReasoningContent(t *testing.T) {
+	var sawReasoning bool
+	var mux http.ServeMux
+	mux.HandleFunc("/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		sawReasoning = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"reasoning_content":"thinking hard","content":"{\"word\":\"run\"}"}}]}`))
+	})
+	srv := httptest.NewServer(&mux)
+	defer srv.Close()
+
+	adapter := NewOpenAIAdapter(AdapterConfig{BaseURL: srv.URL, APIKey: "k"})
+	resp, err := adapter.Complete(context.Background(), CompleteRequest{Model: "m"})
+	if err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	if !sawReasoning || resp.Content != `{"word":"run"}` {
+		t.Errorf("reasoning_content must not break parsing: %q", resp.Content)
 	}
 }
 

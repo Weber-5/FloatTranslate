@@ -3,7 +3,7 @@
  * Vocabulary page: search, cards sorted by saved time desc, empty/loading/
  * error states. Delete is confirmed per card.
  */
-import { onMounted, ref, watch } from 'vue'
+import { onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { VocabularyItem } from '@/api/types'
 import { useVocabularyStore } from '@/stores/vocabulary'
@@ -24,11 +24,6 @@ let searchTimer: ReturnType<typeof setTimeout> | null = null
 onMounted(() => {
   void vocabulary.load()
 })
-
-watch(
-  () => vocabulary.error,
-  () => undefined,
-)
 
 function onSearchInput(): void {
   if (searchTimer) clearTimeout(searchTimer)

@@ -20,7 +20,7 @@ import { useSettingsStore } from '@/stores/settings'
 import { getBackendConfig } from '@/api'
 import { APP_VERSION } from '@/constants'
 import { checkForUpdate, type LatestRelease } from '@/services/update'
-import { openLogsDir } from '@/services/native'
+import { openLogsDir, openExternalUrl } from '@/services/native'
 import SettingRow from './SettingRow.vue'
 import IconExternal from '@/components/icons/IconExternal.vue'
 
@@ -70,7 +70,13 @@ async function runUpdateCheck(): Promise<void> {
       notice.value = null
     } else {
       availableUpdate.value = null
-      showNotice(t('settings.about.upToDate'))
+      // improvement bug #7: a repo without a published release is not the same
+      // as "you are up to date" — say which one it is.
+      showNotice(
+        result.status === 'no-release'
+          ? t('settings.about.noRelease')
+          : t('settings.about.upToDate'),
+      )
     }
   } catch {
     availableUpdate.value = null
@@ -91,6 +97,17 @@ const logsPath = computed(() => {
 async function onOpenLogs(): Promise<void> {
   const result = await openLogsDir()
   showNotice(result.ok ? t('settings.about.logsOpened') : t('common.unsupported'))
+}
+
+/**
+ * improvement bug #7: the packaged WebView denies `target="_blank"` popups,
+ * so external links are opened by the host instead. The anchor stays in the
+ * DOM (href copyable, testable) and only its default navigation is cancelled.
+ */
+async function onOpenExternal(url: string, event: MouseEvent): Promise<void> {
+  event.preventDefault()
+  const result = await openExternalUrl(url)
+  if (!result.ok) showNotice(t('common.unsupported'))
 }
 </script>
 
@@ -131,6 +148,7 @@ async function onOpenLogs(): Promise<void> {
         rel="noopener noreferrer"
         class="update-link"
         data-testid="update-link"
+        @click="onOpenExternal(availableUpdate.html_url ?? RELEASE_URL, $event)"
       >
         {{ t('settings.about.viewUpdate') }}
         <IconExternal :size="12" />
@@ -159,7 +177,14 @@ async function onOpenLogs(): Promise<void> {
     </p>
 
     <SettingRow :label="t('settings.about.github')">
-      <a :href="GITHUB_URL" target="_blank" rel="noopener noreferrer" class="github-link">
+      <a
+        :href="GITHUB_URL"
+        target="_blank"
+        rel="noopener noreferrer"
+        class="github-link"
+        data-testid="github-link"
+        @click="onOpenExternal(GITHUB_URL, $event)"
+      >
         {{ t('settings.about.github') }}
         <IconExternal :size="13" />
       </a>

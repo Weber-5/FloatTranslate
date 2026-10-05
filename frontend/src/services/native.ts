@@ -10,6 +10,7 @@
  *   set_always_on_top(enabled)                    → void
  *   reset_window_state()                          → void
  *   open_logs_dir()                               → void
+ *   open_external_url(url)                        → void
  *   pick_save_path({ options })                   → { ok, path?, cancelled? }
  *   pick_open_path({ options })                   → { ok, path?, cancelled? }
  *
@@ -198,6 +199,33 @@ export async function openLogsDir(): Promise<NativeValue<boolean>> {
     } catch {
       return { ok: false, unsupported: true }
     }
+  }
+  return { ok: true, value: true }
+}
+
+/**
+ * Opens an external `http(s)` URL in the default browser through the host.
+ *
+ * improvement bug #7: the packaged WebView denies `target="_blank"` popups
+ * (Tauri installs no new-window handler, so wry marks the request handled and
+ * drops it), which made the "查看更新" / GitHub links dead. The host command
+ * re-validates the scheme before handing the URL to the shell.
+ *
+ * Browser/mock mode falls back to window.open so `npm run dev` keeps working.
+ */
+export async function openExternalUrl(url: string): Promise<NativeValue<boolean>> {
+  if (isRealHost()) {
+    try {
+      await tauriInvoke('open_external_url', { url })
+      return { ok: true, value: true }
+    } catch {
+      return { ok: false, unsupported: true }
+    }
+  }
+  try {
+    window.open(url, '_blank', 'noopener,noreferrer')
+  } catch {
+    // Pop-up blocked — the caller still shows the URL as selectable text.
   }
   return { ok: true, value: true }
 }

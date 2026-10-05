@@ -116,6 +116,7 @@ pub fn run() {
             commands::set_always_on_top,
             commands::reset_window_state,
             commands::open_logs_dir,
+            commands::open_external_url,
             commands::minimize_window,
             commands::hide_to_tray
         ]);

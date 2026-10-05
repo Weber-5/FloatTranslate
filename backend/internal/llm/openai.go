@@ -8,9 +8,13 @@
 //	{model, messages, stream:false, temperature:0.2,
 //	 response_format:{"type":"json_object"}}
 //
-// Translation requests never carry thinking/reasoning fields (translation
-// thinking is always off, docs/06 §11). The choices[0].message.content
-// string is returned as the raw JSON payload; markdown fences are stripped.
+// Translation requests must produce structured output directly, with no
+// reasoning at all (docs/06 §11). Different OpenAI-compatible vendors accept
+// different "disable thinking" fields, so a translation request carries every
+// dialect we know of (enable_thinking, thinking, chat_template_kwargs) and is
+// retried once without the optional ones when a strict endpoint answers 400
+// for fields it does not know. The choices[0].message.content string is
+// returned as the raw JSON payload; markdown fences are stripped.
 package llm
 
 import (
@@ -20,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"regexp"
@@ -119,12 +124,13 @@ type chatMessage struct {
 	Content string `json:"content"`
 }
 
-// chatRequest is the Chat Completions request shape. EnableThinking is
-// ALWAYS serialized (explicit true/false): hybrid-reasoning models on
-// OpenAI-compatible endpoints default to thinking ON when the field is
-// absent, which made translation uselessly slow (improvement bug #1).
-// Translation (Complete/ChatComplete) pins false (docs/06 §11); Stream
-// carries the user's thinking toggle.
+// chatRequest is the Chat Completions request shape.
+//
+// EnableThinking is ALWAYS serialized (explicit true/false): hybrid-reasoning
+// models on OpenAI-compatible endpoints default to thinking ON when the field
+// is absent, which made translation uselessly slow (improvement bug #1).
+// Translation (Complete/ChatComplete) pins false (docs/06 §11) AND adds the
+// vendor dialects below; Stream carries the user's thinking toggle.
 type chatRequest struct {
 	Model          string          `json:"model"`
 	Messages       []chatMessage   `json:"messages"`
@@ -133,6 +139,33 @@ type chatRequest struct {
 	ResponseFormat *responseFormat `json:"response_format,omitempty"`
 	MaxTokens      *int            `json:"max_tokens,omitempty"`
 	EnableThinking *bool           `json:"enable_thinking"`
+	// Thinking is the Anthropic/GLM-style dialect: {"thinking":{"type":"disabled"}}.
+	Thinking *thinkingControl `json:"thinking,omitempty"`
+	// ChatTemplateKwargs is the vLLM/SGLang-served hybrid dialect (DeepSeek
+	// V3.1+/Qwen3): {"chat_template_kwargs":{"thinking":false}}.
+	ChatTemplateKwargs *chatTemplateKwargs `json:"chat_template_kwargs,omitempty"`
+}
+
+// thinkingControl is the object form of a vendor thinking switch.
+type thinkingControl struct {
+	Type string `json:"type"`
+}
+
+// chatTemplateKwargs carries the chat-template level switch used by
+// vLLM/SGLang deployments of hybrid reasoning models.
+type chatTemplateKwargs struct {
+	Thinking bool `json:"thinking"`
+}
+
+// suppressThinking marks a request as "no reasoning" in every dialect we know
+// of. One field is not enough: `enable_thinking` is the Qwen/DashScope style,
+// while DeepSeek's own API and vLLM-served hybrids use the other two. A model
+// that keeps thinking ON turns a one-word lookup into a multi-second call.
+func suppressThinking(body *chatRequest) {
+	off := false
+	body.EnableThinking = &off
+	body.Thinking = &thinkingControl{Type: "disabled"}
+	body.ChatTemplateKwargs = &chatTemplateKwargs{Thinking: false}
 }
 
 type responseFormat struct {
@@ -143,6 +176,9 @@ type chatResponse struct {
 	Choices []struct {
 		Message struct {
 			Content string `json:"content"`
+			// Present only when the provider actually reasoned; used purely as
+			// a diagnostic (the text itself is never logged or returned).
+			ReasoningContent string `json:"reasoning_content"`
 		} `json:"message"`
 	} `json:"choices"`
 }
@@ -163,10 +199,9 @@ func (a *OpenAIAdapter) Complete(ctx context.Context, req CompleteRequest) (Comp
 		Temperature:    0.2,
 		ResponseFormat: &responseFormat{Type: "json_object"},
 	}
-	// Translation must never think (docs/06 §11): explicit false so hybrid
-	// models whose default is "thinking on" stay fast.
-	enableThinking := false
-	body.EnableThinking = &enableThinking
+	// Translation must never think (docs/06 §11): structured output directly,
+	// no chain of thought. Explicit false plus every disable-dialect.
+	suppressThinking(&body)
 	content, err := a.postChat(ctx, body)
 	if err != nil {
 		return CompleteResponse{}, err
@@ -176,15 +211,25 @@ func (a *OpenAIAdapter) Complete(ctx context.Context, req CompleteRequest) (Comp
 
 // postChat issues one Chat Completions call and returns
 // choices[0].message.content.
+//
+// A provider that rejects the optional thinking-suppression dialects (strict
+// OpenAI-compatible endpoints may answer 400 for unknown fields) is retried
+// ONCE with only the pre-existing shape, so adding the dialects can never
+// break a working translation setup.
 func (a *OpenAIAdapter) postChat(ctx context.Context, body chatRequest) (string, error) {
-	raw, err := json.Marshal(body)
+	status, respBody, err := a.sendChatOnce(ctx, body)
 	if err != nil {
-		return "", fmt.Errorf("encode chat request: %w", err)
+		return "", err
 	}
-	status, respBody, err := doProviderRequest(ctx, a.client, http.MethodPost,
-		joinURL(a.cfg.BaseURL, "chat/completions"), a.cfg.APIKey, raw)
-	if err != nil {
-		return "", classifyTransportError(err)
+	if status == http.StatusBadRequest && body.Thinking != nil {
+		slog.WarnContext(ctx, "provider rejected the thinking-suppression fields; retrying without them",
+			slog.Int("status", status))
+		body.Thinking = nil
+		body.ChatTemplateKwargs = nil
+		status, respBody, err = a.sendChatOnce(ctx, body)
+		if err != nil {
+			return "", err
+		}
 	}
 	if status != http.StatusOK {
 		return "", providerHTTPError(status, respBody)
@@ -196,7 +241,29 @@ func (a *OpenAIAdapter) postChat(ctx context.Context, body chatRequest) (string,
 	if len(decoded.Choices) == 0 {
 		return "", fmt.Errorf("%w: response has no choices", ErrUnavailable)
 	}
+	// Diagnostic only: a hybrid model that ignored the suppression returns its
+	// chain of thought here, which is exactly what makes a one-word lookup slow
+	// (improvement bug #1). The reasoning text itself is never logged.
+	if chars := len([]rune(decoded.Choices[0].Message.ReasoningContent)); chars > 0 {
+		slog.WarnContext(ctx, "provider returned reasoning tokens for a no-thinking request",
+			slog.Int("reasoning_chars", chars), slog.String("model", body.Model))
+	}
 	return decoded.Choices[0].Message.Content, nil
+}
+
+// sendChatOnce performs one raw Chat Completions call: encode, POST, classify
+// transport failures. Non-200 statuses are returned to the caller.
+func (a *OpenAIAdapter) sendChatOnce(ctx context.Context, body chatRequest) (int, []byte, error) {
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return 0, nil, fmt.Errorf("encode chat request: %w", err)
+	}
+	status, respBody, err := doProviderRequest(ctx, a.client, http.MethodPost,
+		joinURL(a.cfg.BaseURL, "chat/completions"), a.cfg.APIKey, raw)
+	if err != nil {
+		return 0, nil, classifyTransportError(err)
+	}
+	return status, respBody, nil
 }
 
 // doProviderRequest performs one authenticated provider HTTP call and

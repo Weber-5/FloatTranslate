@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Weber-5/FloatTranslate/backend/internal/backup"
 	"github.com/Weber-5/FloatTranslate/backend/internal/credential"
 	"github.com/Weber-5/FloatTranslate/backend/internal/database"
 	"github.com/Weber-5/FloatTranslate/backend/internal/logging"
@@ -156,8 +157,8 @@ func TestExportBackupShape(t *testing.T) {
 	if _, err := time.Parse(time.RFC3339, doc.ExportedAt); err != nil {
 		t.Errorf("exported_at %q is not RFC3339: %v", doc.ExportedAt, err)
 	}
-	if doc.AppVersion != "1.0.0" {
-		t.Errorf("app_version = %q", doc.AppVersion)
+	if doc.AppVersion != backup.AppVersion {
+		t.Errorf("app_version = %q, want %q", doc.AppVersion, backup.AppVersion)
 	}
 	for _, key := range []string{"backup_schema_version", "exported_at", "app_version", "settings",
 		"translation_history", "vocabulary", "terminology", "chats", "messages", "open_tabs"} {

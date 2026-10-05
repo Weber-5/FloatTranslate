@@ -10,6 +10,7 @@ import {
   fetchLatestRelease,
   UpdateCheckError,
 } from '@/services/update'
+import { __setNativeInvokeForTests } from '@/services/native'
 import AboutSection from '@/components/settings/AboutSection.vue'
 
 function releaseResponse(tag: string): Response {
@@ -19,7 +20,21 @@ function releaseResponse(tag: string): Response {
   )
 }
 
+/**
+ * The next patch release after the running version. Derived from APP_VERSION so
+ * these tests never need editing when the app version is bumped (they used to
+ * hardcode "v1.0.2 is newer", which broke on the 1.0.2 release).
+ */
+function nextPatch(version: string): string {
+  const [major, minor, patch] = version.split('.').map(Number)
+  return `v${major}.${minor}.${(patch || 0) + 1}`
+}
+
+/** A deliberately older release tag. */
+const OLDER_TAG = 'v0.9.0'
+
 afterEach(() => {
+  __setNativeInvokeForTests(null)
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
 })
@@ -33,7 +48,7 @@ describe('semver comparison (docs/10 §5)', () => {
   })
 
   it('compares major/minor/patch lexicographically', () => {
-    expect(compareSemver('v1.0.2', APP_VERSION)).toBeGreaterThan(0)
+    expect(compareSemver(nextPatch(APP_VERSION), APP_VERSION)).toBeGreaterThan(0)
     expect(compareSemver(`v${APP_VERSION}`, APP_VERSION)).toBe(0)
     expect(compareSemver('v0.9.9', APP_VERSION)).toBeLessThan(0)
     expect(compareSemver('v2.0.0', 'v1.99.99')).toBeGreaterThan(0)
@@ -75,22 +90,22 @@ describe('update service', () => {
   })
 
   it('checkForUpdate classifies newer vs equal releases', async () => {
-    const newer = await checkForUpdate(APP_VERSION, { tag_name: 'v1.0.2' })
+    const newer = await checkForUpdate(APP_VERSION, { tag_name: nextPatch(APP_VERSION) })
     expect(newer.status).toBe('update-available')
-    const same = await checkForUpdate(APP_VERSION, { tag_name: 'v1.0.0' })
+    const same = await checkForUpdate(APP_VERSION, { tag_name: `v${APP_VERSION}` })
     expect(same.status).toBe('up-to-date')
-    const older = await checkForUpdate(APP_VERSION, { tag_name: 'v0.9.0' })
+    const older = await checkForUpdate(APP_VERSION, { tag_name: OLDER_TAG })
     expect(older.status).toBe('up-to-date')
   })
 
-  it('treats "no published release" (HTTP 404) as up-to-date, not an error', async () => {
-    // improvement bug #7: with only a draft release, /releases/latest
-    // answers 404 — that must never surface as a failed update check.
+  it('reports "no published release" (HTTP 404) as its own state', async () => {
+    // improvement bug #7: a repo without a public release answers 404. That is
+    // neither an error nor a real "you are up to date" comparison.
     vi.stubGlobal('fetch', vi.fn(async () => new Response('Not Found', { status: 404 })))
     const latest = await fetchLatestRelease()
     expect(latest).toBeNull()
     const result = await checkForUpdate(APP_VERSION)
-    expect(result.status).toBe('up-to-date')
+    expect(result.status).toBe('no-release')
     expect(result.latest).toBeNull()
   })
 })
@@ -113,7 +128,8 @@ describe('AboutSection update check UI', () => {
   })
 
   it('newer release → banner with version, release link and URL fallback', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => releaseResponse('v1.0.2')))
+    const newerTag = nextPatch(APP_VERSION)
+    vi.stubGlobal('fetch', vi.fn(async () => releaseResponse(newerTag)))
     const { wrapper } = await mountAbout()
 
     await wrapper.find('[data-testid="check-update"]').trigger('click')
@@ -121,18 +137,18 @@ describe('AboutSection update check UI', () => {
 
     const banner = wrapper.find('[data-testid="update-banner"]')
     expect(banner.exists()).toBe(true)
-    expect(banner.text()).toContain('v1.0.2')
+    expect(banner.text()).toContain(newerTag)
     const link = wrapper.find('[data-testid="update-link"]')
     expect(link.attributes('href')).toBe(
-      'https://github.com/Weber-5/FloatTranslate/releases/tag/v1.0.2',
+      `https://github.com/Weber-5/FloatTranslate/releases/tag/${newerTag}`,
     )
     expect(link.attributes('rel')).toContain('noopener')
-    expect(banner.text()).toContain('releases/tag/v1.0.2')
+    expect(banner.text()).toContain(`releases/tag/${newerTag}`)
     wrapper.unmount()
   })
 
   it('equal version → up-to-date toast, no banner', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => releaseResponse('v1.0.0')))
+    vi.stubGlobal('fetch', vi.fn(async () => releaseResponse(`v${APP_VERSION}`)))
     const { wrapper } = await mountAbout()
 
     await wrapper.find('[data-testid="check-update"]').trigger('click')
@@ -140,6 +156,50 @@ describe('AboutSection update check UI', () => {
 
     expect(wrapper.find('[data-testid="update-banner"]').exists()).toBe(false)
     expect(wrapper.find('.notice').text()).toContain('已是最新版本')
+    wrapper.unmount()
+  })
+
+  it('no published release → explicit notice, never a false "up to date"', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('Not Found', { status: 404 })))
+    const { wrapper } = await mountAbout()
+
+    await wrapper.find('[data-testid="check-update"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="update-banner"]').exists()).toBe(false)
+    expect(wrapper.find('.notice').text()).toContain('尚未检测到已发布的版本')
+    expect(wrapper.find('[data-testid="update-error"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('opens external links through the host (target=_blank is denied in the webview)', async () => {
+    // improvement bug #7: wry marks new-window requests handled when Tauri
+    // installs no new-window handler, so the anchor alone did nothing.
+    const invoked: Array<{ cmd: string; args?: Record<string, unknown> }> = []
+    __setNativeInvokeForTests(async (cmd, args) => {
+      invoked.push({ cmd, args })
+      return undefined
+    })
+    vi.stubGlobal('fetch', vi.fn(async () => releaseResponse(nextPatch(APP_VERSION))))
+    const { wrapper } = await mountAbout()
+
+    await wrapper.find('[data-testid="check-update"]').trigger('click')
+    await flushPromises()
+    await wrapper.find('[data-testid="update-link"]').trigger('click')
+    await flushPromises()
+    await wrapper.find('[data-testid="github-link"]').trigger('click')
+    await flushPromises()
+
+    expect(invoked).toEqual([
+      {
+        cmd: 'open_external_url',
+        args: { url: `https://github.com/Weber-5/FloatTranslate/releases/tag/${nextPatch(APP_VERSION)}` },
+      },
+      {
+        cmd: 'open_external_url',
+        args: { url: 'https://github.com/Weber-5/FloatTranslate' },
+      },
+    ])
     wrapper.unmount()
   })
 

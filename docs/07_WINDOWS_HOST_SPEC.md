@@ -70,6 +70,14 @@ Tauri 只负责原生文件选择：
 
 实际序列化/校验由 Go。
 
+## 6.1 外部链接
+
+WebView 会拦截 `target="_blank"`（Tauri 未注册 new-window handler 时 wry 直接标记为已处理），因此 UI 中的外部链接必须走宿主命令：
+
+- `open_external_url(url)`：仅接受 `http://` / `https://`，由 `ShellExecuteW` 交给默认浏览器。
+- 其他 scheme（`file:`、`javascript:`、自定义协议）一律拒绝。
+- 链接仍保留 `href` 便于复制，但点击默认行为由前端取消。
+
 ## 7. Sidecar Lifecycle
 
 - 动态端口。

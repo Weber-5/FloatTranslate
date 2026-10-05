@@ -169,9 +169,10 @@ func (a *OpenAIAdapter) ChatComplete(ctx context.Context, req ChatCompletionRequ
 		Temperature: 0.7,
 	}
 	// Compact summaries never need reasoning (docs/06 §11: thinking is a
-	// user-facing chat toggle only); explicit false keeps it fast.
-	enableThinking := false
-	body.EnableThinking = &enableThinking
+	// user-facing chat toggle only): structured/plain output directly, with
+	// every suppression dialect (a hybrid model that keeps thinking ON would
+	// make compaction slow for no benefit).
+	suppressThinking(&body)
 	content, err := a.postChat(ctx, body)
 	if err != nil {
 		return "", err
