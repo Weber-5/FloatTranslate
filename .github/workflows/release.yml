@@ -146,5 +146,15 @@ jobs:
         with:
           draft: true
           body_path: dist/release-notes.md
+          # Explicit asset list, NOT dist/*: the directory also holds the
+          # zero-byte portable.flag (and the bare sidecar), and the Releases
+          # API rejects any asset with size < 1 with
+          #   ReleaseAsset "size must be greater than or equal to 1".
+          # The flag still ships inside the portable ZIP.
           files: |
-            dist/*
+            dist/FloatTranslate_*_x64-setup.exe
+            dist/FloatTranslate_*_x64-portable.exe
+            dist/FloatTranslate_*_x64-portable.zip
+            dist/floattranslate-backend.exe
+            dist/checksums.txt
+            dist/release-notes.md
