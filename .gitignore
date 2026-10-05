@@ -40,6 +40,9 @@ logs/
 Thumbs.db
 desktop.ini
 
+# ---- Local workflow (user bug reports / usage notes; never published) ----
+improvement/
+
 # ---- Env / secrets (must never be committed) ----
 .env
 .env.*
