@@ -3,6 +3,7 @@ package api
 import (
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -30,7 +31,18 @@ type Server struct {
 	resolver         llm.Resolver
 	providerSettings *ProviderSettingsStore
 	ping             func() error
+	// translationBudget bounds ONE translation request end to end. Each
+	// provider call has its own timeout, but a chunked document multiplies it
+	// by the chunk count: without a total budget a pathological run can occupy
+	// the request for tens of minutes (one 47-minute request was observed in a
+	// user log). Zero means DefaultTranslationBudget.
+	translationBudget time.Duration
 }
+
+// DefaultTranslationBudget is the end-to-end limit for one translation request.
+// Normal requests finish in 1-3 s per chunk, so 5 minutes only trips on
+// pathological provider behaviour, where failing fast beats hanging.
+const DefaultTranslationBudget = 5 * time.Minute
 
 // NewServer builds the API server. providerSettings holds the provider
 // configuration + Credential Manager-backed API key; it MUST be the same

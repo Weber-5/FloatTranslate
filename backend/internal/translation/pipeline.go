@@ -610,10 +610,11 @@ func (p *Pipeline) completeAndDecode(ctx context.Context, e *runEnv, kind,
 	}
 	// Diagnostic (improvement bug #1): a repair means TWO provider calls for a
 	// single translation, doubling the latency the user perceives. Only counts
-	// are logged — never the model output or the validation detail (both can
-	// echo user/model content).
+	// and the failing schema location are logged — never the model output or
+	// the offending values.
 	slog.WarnContext(ctx, "translation output failed schema validation; issuing one repair request",
-		slog.String("kind", kind), slog.Int("raw_chars", len([]rune(raw.Content))))
+		slog.String("kind", kind), slog.Int("raw_chars", len([]rune(raw.Content))),
+		slog.String("reason", schemaFailureReason(verr)))
 	repair, rerr := e.provider.Complete(ctx, llm.CompleteRequest{
 		Model:        e.model,
 		Kind:         kind,
@@ -628,10 +629,43 @@ func (p *Pipeline) completeAndDecode(ctx context.Context, e *runEnv, kind,
 	}
 	payload, verr = validateAndDecode(schema, repair.Content)
 	if verr != nil {
-		slog.WarnContext(ctx, "repair request also failed schema validation", slog.String("kind", kind))
+		slog.WarnContext(ctx, "repair request also failed schema validation",
+			slog.String("kind", kind), slog.String("reason", schemaFailureReason(verr)))
 		return nil, "", verr
 	}
 	return payload, repair.Content, nil
+}
+
+// schemaFailureReason renders a JSON-Schema validation error as a content-free
+// diagnostic: the failing keyword path plus the instance location. The
+// offending value is never included (it can echo model/user content).
+func schemaFailureReason(err error) string {
+	var ve *jsonschema.ValidationError
+	if !errors.As(err, &ve) || ve == nil {
+		return ""
+	}
+	// The root error often carries only the aggregate keyword ("anyOf"/
+	// "oneOf"); the actionable location lives in the deepest cause.
+	leaf := ve
+	for len(leaf.Causes) > 0 && leaf.Causes[0] != nil {
+		leaf = leaf.Causes[0]
+	}
+	keyword := keywordPath(leaf)
+	if keyword == "" {
+		keyword = keywordPath(ve)
+	}
+	if keyword == "" {
+		keyword = "?"
+	}
+	return fmt.Sprintf("%s at /%s", keyword, strings.Join(leaf.InstanceLocation, "/"))
+}
+
+// keywordPath renders an error kind's keyword path ("" when unavailable).
+func keywordPath(ve *jsonschema.ValidationError) string {
+	if ve == nil || ve.ErrorKind == nil {
+		return ""
+	}
+	return strings.Join(ve.ErrorKind.KeywordPath(), "/")
 }
 
 // fromCache builds a cache-sourced response and records it in history.

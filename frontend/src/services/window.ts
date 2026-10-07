@@ -24,7 +24,7 @@ async function safeInvoke(command: string): Promise<void> {
     const { invoke } = await import('@tauri-apps/api/core')
     await invoke(command)
   } catch {
-    // Host command not implemented yet (Phase 1 skeleton) — ignore.
+    // Older host bundle without the command: window actions degrade to no-ops.
   }
 }
 

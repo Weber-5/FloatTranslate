@@ -8,9 +8,9 @@
  * - Newer release → banner with version + "查看更新" link (rel noopener,
  *   target _blank) and the release URL as text fallback.
  * - Equal/older → "已是最新版本" toast.
+ * - No published release (private repo / no release yet) → its own notice,
+ *   never a false "up to date".
  * - Network failure → inline retryable error (重试 re-runs the check).
- * - Mock mode: no request is made unless the demo flag
- *   force_update_available is set, which simulates latest = v1.0.1.
  * - 清空日志 has no dedicated endpoint in 1.0 — the row shows the logs
  *   path only (freeze decision), with open_logs_dir next to it.
  */
@@ -19,7 +19,7 @@ import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '@/stores/settings'
 import { getBackendConfig } from '@/api'
 import { APP_VERSION } from '@/constants'
-import { checkForUpdate, type LatestRelease } from '@/services/update'
+import { checkForUpdate, UpdateCheckError, type LatestRelease } from '@/services/update'
 import { openLogsDir, openExternalUrl } from '@/services/native'
 import SettingRow from './SettingRow.vue'
 import IconExternal from '@/components/icons/IconExternal.vue'
@@ -28,14 +28,28 @@ const { t } = useI18n()
 const settings = useSettingsStore()
 
 const notice = ref<string | null>(null)
+/** Set with a sticky notice: "checked at HH:MM:SS" (UX review 2026-10-07). */
+const noticeAt = ref<string | null>(null)
+let noticeTimer: number | undefined
 const GITHUB_URL = 'https://github.com/Weber-5/FloatTranslate'
 const RELEASE_URL = `${GITHUB_URL}/releases/latest`
 
-function showNotice(message: string): void {
+/**
+ * Inline notice under the row. Transient by default (4 s); the update-check
+ * result is STICKY so it is still readable after the user looks away.
+ */
+function showNotice(message: string, sticky = false): void {
   notice.value = message
-  window.setTimeout(() => {
-    if (notice.value === message) notice.value = null
-  }, 4000)
+  noticeAt.value = sticky ? new Date().toLocaleTimeString() : null
+  if (noticeTimer !== undefined) window.clearTimeout(noticeTimer)
+  if (!sticky) {
+    noticeTimer = window.setTimeout(() => {
+      if (notice.value === message) {
+        notice.value = null
+        noticeAt.value = null
+      }
+    }, 4000)
+  }
 }
 
 // ---- Update check -----------------------------------------------------------------
@@ -45,42 +59,34 @@ const updateError = ref<string | null>(null)
 /** The newer release when `update-available`; null otherwise. */
 const availableUpdate = ref<LatestRelease | null>(null)
 
-/** Demo hook: mock mode can simulate a newer release without any request.
- *  The simulated version is always one patch above the running version so
- *  the banner stays demoable across releases. */
-const simulatedLatest = computed(() => {
-  if (settings.mockMode && settings.app?.force_update_available === true) {
-    const [major, minor, patch] = APP_VERSION.split('.').map(Number)
-    return {
-      tag_name: `v${major}.${minor}.${(patch || 0) + 1}`,
-      html_url: RELEASE_URL,
-    }
-  }
-  return undefined
-})
-
 async function runUpdateCheck(): Promise<void> {
   if (checking.value) return
   checking.value = true
   updateError.value = null
+  // A previous result must not look like the current one.
+  notice.value = null
+  noticeAt.value = null
   try {
-    const result = await checkForUpdate(APP_VERSION, simulatedLatest.value)
+    const result = await checkForUpdate(APP_VERSION)
     if (result.status === 'update-available' && result.latest) {
       availableUpdate.value = result.latest
-      notice.value = null
     } else {
       availableUpdate.value = null
       // improvement bug #7: a repo without a published release is not the same
-      // as "you are up to date" — say which one it is.
+      // as "you are up to date" — say which one it is, and keep it on screen.
       showNotice(
         result.status === 'no-release'
           ? t('settings.about.noRelease')
           : t('settings.about.upToDate'),
+        true,
       )
     }
-  } catch {
+  } catch (error) {
     availableUpdate.value = null
-    updateError.value = t('settings.about.updateCheckFailed')
+    updateError.value =
+      error instanceof UpdateCheckError && error.message === 'timeout'
+        ? t('settings.about.updateTimeout')
+        : t('settings.about.updateCheckFailed')
   } finally {
     checking.value = false
   }
@@ -190,7 +196,10 @@ async function onOpenExternal(url: string, event: MouseEvent): Promise<void> {
       </a>
     </SettingRow>
 
-    <p v-if="notice" class="notice" role="status">{{ notice }}</p>
+    <p v-if="notice" class="notice" role="status" data-testid="about-notice">
+      {{ notice }}
+      <span v-if="noticeAt" class="notice-time">{{ t('settings.about.checkedAt', { time: noticeAt }) }}</span>
+    </p>
   </div>
 </template>
 

@@ -1095,3 +1095,27 @@ func TestRetranslateLongTextRechunks(t *testing.T) {
 		t.Errorf("cache rows = %d, want 1 (overwritten in place)", n)
 	}
 }
+
+// The schema-failure diagnostic must locate the failure WITHOUT echoing any
+// instance value (it reaches the log whenever a repair request is issued).
+func TestSchemaFailureReasonIsContentFree(t *testing.T) {
+	schema, err := compileSchema(`{"type":"object","required":["word"],` +
+		`"additionalProperties":false,"properties":{"word":{"type":"string"}}}`)
+	if err != nil {
+		t.Fatalf("compile schema: %v", err)
+	}
+	_, verr := validateAndDecode(schema, `{"word":1,"SECRET-LEAK":"value"}`)
+	if verr == nil {
+		t.Fatal("expected a validation failure")
+	}
+	reason := schemaFailureReason(verr)
+	if reason == "" {
+		t.Fatal("reason must not be empty")
+	}
+	if strings.Contains(reason, "SECRET-LEAK") {
+		t.Errorf("reason must not echo instance keys/values: %q", reason)
+	}
+	if !strings.Contains(reason, "/word") {
+		t.Errorf("reason should point at the failing location: %q", reason)
+	}
+}

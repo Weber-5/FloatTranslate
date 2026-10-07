@@ -28,9 +28,11 @@ import (
 	"net"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/Weber-5/FloatTranslate/backend/internal/logging"
 	"github.com/Weber-5/FloatTranslate/backend/internal/proxy"
 )
 
@@ -241,14 +243,80 @@ func (a *OpenAIAdapter) postChat(ctx context.Context, body chatRequest) (string,
 	if len(decoded.Choices) == 0 {
 		return "", fmt.Errorf("%w: response has no choices", ErrUnavailable)
 	}
-	// Diagnostic only: a hybrid model that ignored the suppression returns its
-	// chain of thought here, which is exactly what makes a one-word lookup slow
-	// (improvement bug #1). The reasoning text itself is never logged.
-	if chars := len([]rune(decoded.Choices[0].Message.ReasoningContent)); chars > 0 {
-		slog.WarnContext(ctx, "provider returned reasoning tokens for a no-thinking request",
-			slog.Int("reasoning_chars", chars), slog.String("model", body.Model))
+	content := decoded.Choices[0].Message.Content
+	reasoning := decoded.Choices[0].Message.ReasoningContent
+	logResponseShape(ctx, respBody, body.Model, content, reasoning)
+	return content, nil
+}
+
+// thinkingFieldNames are response field names that indicate the provider
+// reasoned anyway despite the suppression fields.
+var thinkingFieldNames = map[string]bool{
+	"reasoning":         true,
+	"reasoning_content": true,
+	"reasoning_details": true,
+	"thinking":          true,
+	"thought":           true,
+	"thoughts":          true,
+	"analysis":          true,
+}
+
+// maxLoggedResponseChars bounds the FT_DEBUG_CONTENT raw-response dump.
+const maxLoggedResponseChars = 4000
+
+// logResponseShape records what the provider actually returned in
+// choices[0].message: field NAMES and sizes only, never field values. This
+// answers "does the model return a think/reasoning structure for a translation
+// call?" straight from the backend log.
+//
+// The raw body is logged additionally, and only, under FT_DEBUG_CONTENT=1
+// (docs/08 §4: content-level logging is opt-in and must never be enabled in a
+// release build).
+func logResponseShape(ctx context.Context, respBody []byte, model, content, reasoning string) {
+	var envelope struct {
+		Choices []struct {
+			Message map[string]json.RawMessage `json:"message"`
+		} `json:"choices"`
 	}
-	return decoded.Choices[0].Message.Content, nil
+	if err := json.Unmarshal(respBody, &envelope); err == nil && len(envelope.Choices) > 0 {
+		names := make([]string, 0, len(envelope.Choices[0].Message))
+		for name, raw := range envelope.Choices[0].Message {
+			names = append(names, fmt.Sprintf("%s:%d", name, len(raw)))
+			if thinkingFieldNames[strings.ToLower(name)] {
+				slog.WarnContext(ctx, "provider response carries a thinking field",
+					slog.String("field", name), slog.String("model", model))
+			}
+		}
+		sort.Strings(names)
+		slog.InfoContext(ctx, "provider response message fields",
+			slog.String("model", model),
+			slog.String("fields", strings.Join(names, ",")),
+			slog.Int("content_chars", len([]rune(content))),
+			slog.Int("reasoning_chars", len([]rune(reasoning))),
+		)
+	}
+	// A hybrid model that ignored the suppression returns its chain of thought
+	// in a reasoning field: that is what makes a one-word lookup slow.
+	if len([]rune(reasoning)) > 0 {
+		slog.WarnContext(ctx, "provider returned reasoning tokens for a no-thinking request",
+			slog.Int("reasoning_chars", len([]rune(reasoning))), slog.String("model", model))
+	}
+	if logging.ContentEnabled() {
+		logging.LogContent(slog.Default(), slog.LevelInfo,
+			"provider raw response (FT_DEBUG_CONTENT=1)",
+			slog.String("model", model),
+			slog.String("body", truncateForLog(respBody, maxLoggedResponseChars)))
+	}
+}
+
+// truncateForLog returns body as text, cut to limit RUNES (so a multi-byte
+// character is never split) with a marker when it was shortened.
+func truncateForLog(body []byte, limit int) string {
+	runes := []rune(string(body))
+	if len(runes) <= limit {
+		return string(runes)
+	}
+	return string(runes[:limit]) + "…(truncated)"
 }
 
 // sendChatOnce performs one raw Chat Completions call: encode, POST, classify

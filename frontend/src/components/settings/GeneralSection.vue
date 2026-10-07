@@ -173,7 +173,7 @@ function setTheme(mode: ThemeMode): void {
       </div>
     </SettingRow>
 
-    <SettingRow :label="t('settings.general.alwaysOnTop')" :hint="t('common.desktopOnly')">
+    <SettingRow :label="t('settings.general.alwaysOnTop')" :hint="t('settings.general.alwaysOnTopHint')">
       <label class="switch">
         <input
           ref="alwaysOnTopInput"
@@ -190,7 +190,7 @@ function setTheme(mode: ThemeMode): void {
 
     <SettingRow
       :label="t('settings.general.autoStart')"
-      :hint="autoStartSupported ? t('common.desktopOnly') : t('settings.general.autoStartUnsupported')"
+      :hint="autoStartSupported ? t('settings.general.autoStartHint') : t('settings.general.autoStartUnsupported')"
     >
       <label class="switch" :title="autoStartSupported ? undefined : t('common.unsupported')">
         <input

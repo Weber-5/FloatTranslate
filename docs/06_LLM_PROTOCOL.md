@@ -143,6 +143,28 @@ inflections[]
 - UI 默认折叠 reasoning。
 - 翻译固定关闭。
 
+### 11.1 翻译关闭思考的字段（按官方文档核对）
+
+DeepSeek 官方 API（`https://api.deepseek.com`，OpenAI 格式）的思考开关是**对象形式**，且**默认打开**、effort 默认 `high`：
+
+```json
+{"thinking": {"type": "disabled"}}
+```
+
+官方文档另有两种格式（Anthropic 格式无独立开关；Responses API 用 `{"reasoning":{"effort":"none"}}`），以及强度控制 `reasoning_effort`。注意 `enable_thinking` **不是** DeepSeek 官方字段（它属于 Qwen/DashScope 系）。
+
+因此翻译与 compact 请求同时下发三种"关闭"方言，覆盖 DeepSeek 官方、Qwen 系与 vLLM/SGLang 部署：
+
+| 字段 | 适用 |
+|---|---|
+| `enable_thinking: false` | Qwen / DashScope / SiliconFlow 等 |
+| `thinking: {"type": "disabled"}` | DeepSeek 官方（OpenAI 格式），默认即打开故必须显式关闭 |
+| `chat_template_kwargs: {"thinking": false}` | vLLM / SGLang 部署的混合推理模型 |
+
+若端点对新增字段返回 400，则**自动降级重试一次**（去掉后两个方言，保留 `enable_thinking:false`），确保不会把原本可用的配置弄坏。响应结构（字段名与长度，不含内容）会写入后端日志；若仍返回 `reasoning_content`，会记录 WARN，可据此判定思考是否真的关闭。
+
+思考模式还会忽略 `temperature` / `presence_penalty` / `frequency_penalty`（不报错、也不生效），关闭后 `temperature` 才会按请求生效。
+
 ## 12. Ask AI
 
 Ask AI 不等同于默认上下文绑定。只有用户主动触发时，才把当前 Word/Text 内容包装为引用插入目标 chat 的 user message/context reference。

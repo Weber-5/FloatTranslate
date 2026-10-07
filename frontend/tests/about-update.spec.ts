@@ -20,6 +20,18 @@ function releaseResponse(tag: string): Response {
   )
 }
 
+/** A fetch that never answers until its AbortSignal fires (hanging GitHub). */
+function hangingFetch(): typeof fetch {
+  return ((_url: string, init?: RequestInit) =>
+    new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => {
+        const error = new Error('aborted')
+        error.name = 'AbortError'
+        reject(error)
+      })
+    })) as unknown as typeof fetch
+}
+
 /**
  * The next patch release after the running version. Derived from APP_VERSION so
  * these tests never need editing when the app version is bumped (they used to
@@ -172,6 +184,45 @@ describe('AboutSection update check UI', () => {
     wrapper.unmount()
   })
 
+  // UX review 2026-10-07: the result used to auto-hide after 4 s, so a user who
+  // looked away saw nothing at all and assumed the button was dead.
+  it('update result is sticky and carries the check time', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('Not Found', { status: 404 })))
+    const { wrapper } = await mountAbout()
+
+    await wrapper.find('[data-testid="check-update"]').trigger('click')
+    await flushPromises()
+
+    const notice = wrapper.find('[data-testid="about-notice"]')
+    expect(notice.exists()).toBe(true)
+    expect(notice.text()).toContain('检查于')
+    // Still there well after the old 4 s auto-hide window.
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(wrapper.find('[data-testid="about-notice"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  // A hanging GitHub must not leave the user with a disabled button forever.
+  it('a hanging request times out with its own message and a retry', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.stubGlobal('fetch', hangingFetch())
+      const { wrapper } = await mountAbout()
+
+      await wrapper.find('[data-testid="check-update"]').trigger('click')
+      await vi.advanceTimersByTimeAsync(10_000)
+      await flushPromises()
+
+      const error = wrapper.find('[data-testid="update-error"]')
+      expect(error.exists()).toBe(true)
+      expect(error.text()).toContain('超时')
+      expect(wrapper.find('[data-testid="update-retry"]').exists()).toBe(true)
+      wrapper.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('opens external links through the host (target=_blank is denied in the webview)', async () => {
     // improvement bug #7: wry marks new-window requests handled when Tauri
     // installs no new-window handler, so the anchor alone did nothing.
@@ -214,34 +265,14 @@ describe('AboutSection update check UI', () => {
     await flushPromises()
     expect(wrapper.find('[data-testid="update-error"]').exists()).toBe(true)
 
-    // Retry with a working network → banner appears.
-    fetchMock.mockImplementation(async () => releaseResponse('v1.1.0'))
+    // Retry with a working network → banner appears. The tag must be NEWER
+    // than the running version, so derive it (a hardcoded tag broke the moment
+    // the app reached that version).
+    fetchMock.mockImplementation(async () => releaseResponse(nextPatch(APP_VERSION)))
     await wrapper.find('[data-testid="update-retry"]').trigger('click')
     await flushPromises()
     expect(wrapper.find('[data-testid="update-error"]').exists()).toBe(false)
-    expect(wrapper.find('[data-testid="update-banner"]').text()).toContain('v1.1.0')
-    wrapper.unmount()
-  })
-
-  it('mock demo flag simulates a newer patch without any network request', async () => {
-    const fetchMock = vi.fn()
-    vi.stubGlobal('fetch', fetchMock)
-    const { i18n } = await setupFreshEnv()
-    const settings = useSettingsStore()
-    await settings.load()
-    await settings.saveApp({ force_update_available: true })
-    const wrapper = mount(AboutSection, { global: { plugins: [i18n] } })
-    await flushPromises()
-
-    await wrapper.find('[data-testid="check-update"]').trigger('click')
-    await flushPromises()
-
-    expect(fetchMock).not.toHaveBeenCalled()
-    const banner = wrapper.find('[data-testid="update-banner"]')
-    expect(banner.exists()).toBe(true)
-    // The simulated version is always one patch above the running version.
-    const [major, minor, patch] = APP_VERSION.split('.').map(Number)
-    expect(banner.text()).toContain(`v${major}.${minor}.${patch + 1}`)
+    expect(wrapper.find('[data-testid="update-banner"]').text()).toContain(nextPatch(APP_VERSION))
     wrapper.unmount()
   })
 

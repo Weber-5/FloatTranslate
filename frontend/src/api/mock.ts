@@ -183,10 +183,10 @@ function createInitialState(): MockState {
 
 function buildMockReply(content: string): string {
   return [
-    '这是 Mock 模式的本地回答。',
+    '这是 Mock 模式的本地回答（浏览器开发模式专用，未发起任何网络请求）。',
     '',
-    `你发送了「${content}」。Phase 1 骨架用模拟流验证多会话、思考开关与 slash 命令的交互；`,
-    'Phase 4 将通过 SSE 接入真实模型输出。',
+    `你发送了「${content}」。真实桌面版通过 Go 后端的 SSE 流式接口调用你配置的模型；`,
+    '此处仅为本地占位回答，用于在没有后端时调试界面。',
   ].join('\n')
 }
 
@@ -327,7 +327,7 @@ export function createMockClient(): ApiClient {
         delay += 60
         emittedWords += 1
         if (opts.forceError && emittedWords === 2) {
-          steps.push({ delay, kind: 'content', text: '' }) // placeholder keeps ordering readable
+          steps.push({ delay, kind: 'content', text: '' }) // empty frame preserves the ordering
           delay += 60
           break
         }

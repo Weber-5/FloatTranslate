@@ -46,8 +46,13 @@ type TauriInvoke = (cmd: string, args?: Record<string, unknown>) => Promise<unkn
 
 let invokeOverride: TauriInvoke | null = null
 
-/** Test-only: replace the Tauri invoke used by every wrapper (simulates the real host). */
+/**
+ * Test-only: replace the Tauri invoke used by every wrapper (simulates the real
+ * host). Inert outside dev/test builds so a production bundle cannot have its
+ * host calls redirected (UX review 2026-10-07, cleanup decision A).
+ */
 export function __setNativeInvokeForTests(fn: TauriInvoke | null): void {
+  if (!import.meta.env.DEV) return
   invokeOverride = fn
 }
 

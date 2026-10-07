@@ -1,6 +1,7 @@
 /**
- * English catalog — placeholder mirror of zh-CN (COMMUNITY task in README).
- * Keys must match zh-CN exactly; the i18n test asserts full key coverage.
+ * English catalog — complete translation of zh-CN (the i18n test asserts full
+ * key parity). The app currently ships zh-CN as its locale; this catalog keeps
+ * every string ready for the language switcher.
  */
 export default {
   common: {
@@ -20,8 +21,6 @@ export default {
     export: 'Export',
     version: 'Version',
     mockMode: 'Mock mode',
-    mockHint: 'Mock mode: local simulated data, no network requests',
-    desktopOnly: 'Requires the Tauri desktop host (placeholder in skeleton)',
     unsupported: 'Not supported in this environment',
     appName: 'FloatTranslate',
   },
@@ -155,7 +154,9 @@ export default {
       themeLight: 'Light',
       themeDark: 'Dark',
       alwaysOnTop: 'Always on top',
+      alwaysOnTopHint: 'Keeps the window above other windows; the close button only hides it to the tray',
       autoStart: 'Launch at startup',
+      autoStartHint: 'Starts FloatTranslate when you sign in to Windows',
       autoStartUnsupported: 'Cannot read the OS launch-at-startup state; the switch is disabled',
       hotkeys: 'Hotkeys',
       hotkeyToggle: 'Show / hide main window',
@@ -248,6 +249,8 @@ export default {
       updateAvailable: 'New version available: {version}',
       viewUpdate: 'View update',
       updateCheckFailed: 'Could not check for updates. Please try again later.',
+      updateTimeout: 'The update check timed out. Check your network and retry.',
+      checkedAt: 'Checked at {time}',
       logs: 'Open logs directory',
       logsOpened: 'Logs directory opened',
       logsPath: 'Logs directory: {path}',

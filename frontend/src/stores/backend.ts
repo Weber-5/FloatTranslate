@@ -136,8 +136,8 @@ export const useBackendStore = defineStore('backend', () => {
       const snapshot = await invoke<string>('get_backend_status')
       if (snapshot !== 'starting') applyHostEvent('backend-status', snapshot)
     } catch {
-      // Event API not available yet (host wiring lands in Phase 3/5) — the
-      // manual probe/retry loop still drives the same gate.
+      // Older host bundle without the event bridge: the manual probe/retry
+      // loop still drives the same gate.
     }
   }
 

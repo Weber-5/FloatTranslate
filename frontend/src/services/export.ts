@@ -31,8 +31,12 @@ type TauriInvoke = (cmd: string, args?: Record<string, unknown>) => Promise<unkn
 
 let invokeOverride: TauriInvoke | null = null
 
-/** Test-only: replace the Tauri invoke used for export_markdown. */
+/**
+ * Test-only: replace the Tauri invoke used for export_markdown. Inert outside
+ * dev/test builds (UX review 2026-10-07, cleanup decision A).
+ */
 export function __setExportInvokeForTests(fn: TauriInvoke | null): void {
+  if (!import.meta.env.DEV) return
   invokeOverride = fn
 }
 

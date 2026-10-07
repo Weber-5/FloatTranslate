@@ -79,6 +79,16 @@ function resolveClient(): Promise<ApiClient> {
   if (isTauri()) {
     return resolveRealClientWithRetry()
   }
+  // Browser-only development path (`npm run dev`, browser tests). The
+  // import.meta.env.DEV guard is what keeps the mock client and its fake word
+  // bank OUT of production bundles: the shipped desktop app must never contain
+  // simulated model data (UX review 2026-10-07, cleanup decision A). Inside the
+  // Tauri host this branch is unreachable — isTauri() short-circuits above.
+  if (!import.meta.env.DEV) {
+    return Promise.reject(
+      new Error('No API client: FloatTranslate must run inside its desktop host.'),
+    )
+  }
   return import('./mock').then(({ createMockClient }) => {
     resolvedIsMock = true
     resolvedConfig = null
@@ -112,6 +122,7 @@ export function useApi(): ApiClient {
 
 /** Test-only: reset cached resolution so a fresh client can be created. */
 export function __resetApiClient(): void {
+  if (!import.meta.env.DEV) return
   clientPromise = null
   resolvedClient = null
   resolvedConfig = null
@@ -120,6 +131,7 @@ export function __resetApiClient(): void {
 
 /** Test-only: inject a backend config so real-mode helpers are testable. */
 export function __setBackendConfigForTests(config: BackendConfig | null): void {
+  if (!import.meta.env.DEV) return
   resolvedConfig = config
 }
 

@@ -1,10 +1,12 @@
 package llm
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -151,6 +153,77 @@ func TestCompleteToleratesReasoningContent(t *testing.T) {
 	}
 	if !sawReasoning || resp.Content != `{"word":"run"}` {
 		t.Errorf("reasoning_content must not break parsing: %q", resp.Content)
+	}
+}
+
+// captureLogs installs a text slog handler for the duration of a test and
+// returns the buffer it writes to.
+func captureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
+
+// The log must name the response fields so "does the model think for a
+// translation call?" is answerable from the backend log — without ever writing
+// the reasoning text or the response body itself.
+func TestCompleteLogsResponseShapeWithoutContent(t *testing.T) {
+	buf := captureLogs(t)
+	t.Setenv("FT_DEBUG_CONTENT", "")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"reasoning_content":"SECRET-THOUGHT","content":"{\"word\":\"run\"}"}}]}`))
+	}))
+	defer srv.Close()
+
+	adapter := NewOpenAIAdapter(AdapterConfig{BaseURL: srv.URL, APIKey: "k"})
+	if _, err := adapter.Complete(context.Background(), CompleteRequest{Model: "m"}); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+
+	out := buf.String()
+	for _, want := range []string{
+		"provider response message fields",
+		"reasoning_content:",
+		"reasoning_chars=",
+		"provider returned reasoning tokens",
+		"carries a thinking field",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "SECRET-THOUGHT") {
+		t.Errorf("reasoning text must never reach the log:\n%s", out)
+	}
+	if strings.Contains(out, "provider raw response") {
+		t.Errorf("raw body must stay behind FT_DEBUG_CONTENT:\n%s", out)
+	}
+}
+
+// FT_DEBUG_CONTENT=1 additionally dumps the raw provider response.
+func TestCompleteLogsRawBodyOnlyWithContentDebug(t *testing.T) {
+	buf := captureLogs(t)
+	t.Setenv("FT_DEBUG_CONTENT", "1")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"word\":\"run\"}"}}]}`))
+	}))
+	defer srv.Close()
+
+	adapter := NewOpenAIAdapter(AdapterConfig{BaseURL: srv.URL, APIKey: "k"})
+	if _, err := adapter.Complete(context.Background(), CompleteRequest{Model: "m"}); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "provider raw response") || !strings.Contains(out, `word`) {
+		t.Errorf("FT_DEBUG_CONTENT=1 must dump the raw response:\n%s", out)
 	}
 }
 

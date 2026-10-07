@@ -8,7 +8,7 @@
  */
 import { isMockMode } from '@/api'
 import { useTranslationStore } from '@/stores/translation'
-import { router } from '@/router'
+import { showTranslatePage } from './navigation'
 
 export const SELECTION_CAPTURED_EVENT = 'selection-captured'
 export const SELECTION_DUPLICATE_GUARD_MS = 1500
@@ -44,9 +44,7 @@ export function handleSelectionCaptured(payload: unknown): string | null {
   // improvement bug #6: the capture can happen on any page (设置/单词本 or
   // the blank pre-navigation state); jump to the translate page so the new
   // tab is actually visible instead of requiring manual clicks.
-  if (router.currentRoute.value.name !== 'translate') {
-    void router.push({ name: 'translate' })
-  }
+  showTranslatePage()
   return tabId
 }
 
@@ -59,7 +57,7 @@ export async function listenSelectionCaptured(): Promise<void> {
       handleSelectionCaptured(event.payload?.text)
     })
   } catch {
-    // Event API not available yet (host wiring lands in Phase 3) — hotkey
-    // capture simply stays inactive until the host emits through Tauri.
+    // Older host bundle without the event bridge: selection capture stays
+    // inactive until the host emits through Tauri.
   }
 }

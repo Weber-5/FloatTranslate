@@ -5,12 +5,16 @@
  * this project publishes.
  *
  * Frozen endpoint: https://api.github.com/repos/Weber-5/FloatTranslate/releases/latest
- * (Accept: application/vnd.github+json, no auth). Mock mode can inject a
- * simulated latest release so the banner is demoable without network access.
+ * (Accept: application/vnd.github+json, no auth). `checkForUpdate` also accepts
+ * an already-fetched release so unit tests can exercise every branch without
+ * network access.
  */
 
 export const RELEASE_API_URL =
   'https://api.github.com/repos/Weber-5/FloatTranslate/releases/latest'
+
+/** Hard bound on the release lookup (see fetchLatestRelease). */
+export const RELEASE_TIMEOUT_MS = 10_000
 
 /** GitHub Releases Accept header per docs (no auth, public repo). */
 const RELEASE_ACCEPT = 'application/vnd.github+json'
@@ -76,17 +80,28 @@ export function compareSemver(a: string, b: string): number {
  * published release (HTTP 404 — draft releases are invisible to this
  * endpoint; improvement bug #7). Other network/HTTP failures reject with
  * UpdateCheckError so the UI can offer a retry.
+ *
+ * The lookup is bounded by `timeoutMs`: a hanging GitHub must never leave the
+ * user watching a disabled button with no feedback (UX review 2026-10-07).
+ * A timeout rejects with UpdateCheckError('timeout') so the UI can say so.
  */
 export async function fetchLatestRelease(
   fetchImpl: typeof fetch = fetch,
+  timeoutMs: number = RELEASE_TIMEOUT_MS,
 ): Promise<LatestRelease | null> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
   let response: Response
   try {
     response = await fetchImpl(RELEASE_API_URL, {
       headers: { Accept: RELEASE_ACCEPT },
+      signal: controller.signal,
     })
-  } catch {
-    throw new UpdateCheckError('network error')
+  } catch (error) {
+    const aborted = error instanceof Error && error.name === 'AbortError'
+    throw new UpdateCheckError(aborted ? 'timeout' : 'network error')
+  } finally {
+    clearTimeout(timer)
   }
   if (response.status === 404) return null
   if (!response.ok) {
@@ -106,9 +121,9 @@ export async function fetchLatestRelease(
 }
 
 /**
- * Compares the latest release against the running version. `simulatedLatest`
- * replaces the network call (mock mode: { tag_name: 'v1.0.1' } when the demo
- * flag is set, so no real request leaves the machine).
+ * Compares the latest release against the running version. The optional
+ * `knownLatest` skips the network call (used by tests and by callers that
+ * already hold a release payload).
  *
  * No published release (HTTP 404, or a repo that is not public yet) is its own
  * outcome: reporting "up to date" there would claim a comparison that never
@@ -116,10 +131,10 @@ export async function fetchLatestRelease(
  */
 export async function checkForUpdate(
   currentVersion: string,
-  simulatedLatest?: LatestRelease,
+  knownLatest?: LatestRelease,
   fetchImpl: typeof fetch = fetch,
 ): Promise<UpdateCheckResult> {
-  const latest = simulatedLatest ?? (await fetchLatestRelease(fetchImpl))
+  const latest = knownLatest ?? (await fetchLatestRelease(fetchImpl))
   if (!latest) {
     return { status: 'no-release', latest: null, comparison: 0 }
   }

@@ -10,6 +10,7 @@ import type { HistoryItem, HistoryQuery, TranslationKind } from '@/api/types'
 import { useApi, toApiError } from '@/api'
 import { useUiStore } from '@/stores/ui'
 import { useTranslationStore } from '@/stores/translation'
+import { showTranslatePage } from '@/services/navigation'
 import IconButton from '@/components/common/IconButton.vue'
 import IconClose from '@/components/icons/IconClose.vue'
 import IconSearch from '@/components/icons/IconSearch.vue'
@@ -93,6 +94,9 @@ function setKindFilter(kind: 'all' | TranslationKind): void {
 function open(item: HistoryItem): void {
   ui.historyOpen = false
   void translationStore.openHistoryItem(item)
+  // The drawer overlays any page: make sure the reopened tab is visible
+  // instead of staying behind e.g. 设置 (same defect as the vocabulary card).
+  showTranslatePage()
 }
 
 function askDelete(item: HistoryItem): void {
@@ -158,6 +162,7 @@ function formatTime(iso: string): string {
                 v-model="query"
                 class="search-input"
                 type="search"
+                data-testid="history-search"
                 :placeholder="t('history.searchPlaceholder')"
                 :aria-label="t('history.searchPlaceholder')"
                 @input="onSearchInput"

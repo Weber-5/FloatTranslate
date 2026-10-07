@@ -8,6 +8,7 @@ import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { VocabularyItem } from '@/api/types'
 import { useTranslationStore } from '@/stores/translation'
+import { showTranslatePage } from '@/services/navigation'
 import IconButton from '@/components/common/IconButton.vue'
 import IconTrash from '@/components/icons/IconTrash.vue'
 
@@ -33,6 +34,9 @@ const ipaSummary = computed(() => {
 
 function open(): void {
   translationStore.openSavedWord(props.item)
+  // The card lives on 单词本: without this the word tab opened behind the
+  // vocabulary page and the user had to click 翻译 to see it.
+  showTranslatePage()
 }
 
 function formatSavedAt(iso: string): string {

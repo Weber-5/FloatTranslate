@@ -1,7 +1,9 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -18,12 +20,40 @@ func (s *Server) CreateTranslation(w http.ResponseWriter, r *http.Request) {
 		apperr.WriteHTTP(w, err)
 		return
 	}
-	resp, err := s.pipeline.Translate(r.Context(), req, translation.Options{})
+	resp, err := s.translateWithBudget(r.Context(), req, translation.Options{})
 	if err != nil {
 		apperr.WriteHTTP(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// translateWithBudget runs one translation under the server's end-to-end
+// budget. The request context already cancels when the client disconnects
+// (net/http); the deadline additionally guarantees that a chunked document
+// cannot keep a request alive for tens of minutes when the provider stalls.
+func (s *Server) translateWithBudget(ctx context.Context, req dto.TranslationRequest,
+	opts translation.Options) (dto.TranslationResponse, error) {
+	budget := s.translationBudget
+	if budget <= 0 {
+		budget = DefaultTranslationBudget
+	}
+	ctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+
+	resp, err := s.pipeline.Translate(ctx, req, opts)
+	return resp, mapTranslationDeadline(ctx, err)
+}
+
+// mapTranslationDeadline turns "the request budget expired" into a clear,
+// retryable failure instead of leaking a generic provider error (the frontend
+// shows the message verbatim and offers a retry).
+func mapTranslationDeadline(ctx context.Context, err error) error {
+	if err == nil || !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return err
+	}
+	return apperr.New(apperr.CodeTranslationFailed,
+		"翻译超时（超过 5 分钟），请缩短文本或稍后重试", true)
 }
 
 // GetTranslation implements GET /api/v1/translations/{id}.
@@ -64,7 +94,7 @@ func (s *Server) Retranslate(w http.ResponseWriter, r *http.Request) {
 		ForceKind:   row.Kind,
 		BypassCache: true,
 	}
-	resp, terr := s.pipeline.Translate(r.Context(), req, translation.Options{HistoryID: row.ID})
+	resp, terr := s.translateWithBudget(r.Context(), req, translation.Options{HistoryID: row.ID})
 	if terr != nil {
 		apperr.WriteHTTP(w, terr)
 		return
