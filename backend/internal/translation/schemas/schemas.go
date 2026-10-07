@@ -23,5 +23,6 @@ func WordTranslation() string { return string(wordTranslationSchema) }
 func TextTranslation() string { return string(textTranslationSchema) }
 
 // TextChunk returns the embedded per-chunk text translation schema JSON
-// (Phase 3: {"translated_markdown", "segments"} for a single chunk).
+// (Phase 3 / 1.1.1: {"translated_markdown"} only — the model emits the
+// translation once and the segment view is derived locally).
 func TextChunk() string { return string(textChunkSchema) }

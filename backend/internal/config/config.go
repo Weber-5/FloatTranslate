@@ -37,7 +37,7 @@ const (
 	// DefaultVersion is reported by /health and the startup ready line.
 	// Keep in sync with src-tauri/tauri.conf.json (scripts/check-versions.mjs
 	// asserts this file carries the same string).
-	DefaultVersion = "1.1.0"
+	DefaultVersion = "1.1.1"
 )
 
 // Load reads configuration from the process environment and applies defaults.

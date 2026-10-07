@@ -418,17 +418,19 @@ func (s *scriptProvider) requests() []llm.CompleteRequest {
 	return out
 }
 
-// textPayload builds a schema-valid per-chunk text payload (Phase 3 contract:
-// {"translated_markdown", "segments"}; source_markdown is assembled by the
-// pipeline and never returned by the model).
+// textPayload builds a schema-valid per-chunk text payload (1.1.1 contract:
+// {"translated_markdown"} only — the model emits the translation once and the
+// pipeline derives the 中英对照 view locally; source_markdown is assembled by
+// the pipeline and never returned by the model). segmentTranslations are joined
+// with blank lines so the derived pairing still mirrors the source blocks.
 func textPayload(source, translatedMarkdown string, segmentTranslations ...string) string {
-	segments := make([]dto.Segment, 0, len(segmentTranslations))
-	for _, tr := range segmentTranslations {
-		segments = append(segments, dto.Segment{Source: source, Translation: tr})
+	_ = source
+	translated := translatedMarkdown
+	if len(segmentTranslations) > 0 {
+		translated = strings.Join(segmentTranslations, "\n\n")
 	}
 	raw, err := json.Marshal(map[string]any{
-		"translated_markdown": translatedMarkdown,
-		"segments":            segments,
+		"translated_markdown": translated,
 	})
 	if err != nil {
 		panic(err)
@@ -794,9 +796,13 @@ func (c *chunkEchoProvider) Complete(_ context.Context, req llm.CompleteRequest)
 	if c.invalid[i] {
 		return llm.CompleteResponse{Content: `{"unexpected":true}`}, nil
 	}
+	blocks := splitParagraphs(input)
+	echoed := make([]string, 0, len(blocks))
+	for _, b := range blocks {
+		echoed = append(echoed, "【译】"+b)
+	}
 	payload, err := json.Marshal(map[string]any{
-		"translated_markdown": "【译】" + input,
-		"segments":            []dto.Segment{{Source: input, Translation: "【译】" + input}},
+		"translated_markdown": strings.Join(echoed, "\n\n"),
 	})
 	if err != nil {
 		return llm.CompleteResponse{}, llm.ErrUnavailable

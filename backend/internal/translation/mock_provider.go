@@ -225,13 +225,19 @@ func mockWord(input string) (string, error) {
 	return string(raw), nil
 }
 
-// mockText builds a schema-valid per-chunk text payload for input
-// (Phase 3 contract: {"translated_markdown", "segments"} — the pipeline
-// assembles source_markdown from the original input itself).
+// mockText builds a schema-valid per-chunk text payload for input.
+//
+// 1.1.1 contract: the translation is emitted ONCE as translated_markdown. The
+// mock prefixes every blank-line block so the locally derived 中英对照 view
+// (pairSegments) still pairs 1:1 with the source blocks.
 func mockText(input string) (string, error) {
+	blocks := splitParagraphs(input)
+	translated := make([]string, 0, len(blocks))
+	for _, block := range blocks {
+		translated = append(translated, "（mock 译文）"+block)
+	}
 	payload := map[string]any{
-		"translated_markdown": "（mock 译文）\n\n" + input,
-		"segments":            []dto.Segment{{Source: input, Translation: "（mock 译文）" + input}},
+		"translated_markdown": strings.Join(translated, "\n\n"),
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {

@@ -254,7 +254,7 @@ func (p *Pipeline) translateWord(ctx context.Context, e *runEnv) (any, error) {
 		Kind:         nlp.KindWord,
 		Input:        e.termApplied,
 		SystemPrompt: e.systemPrompt,
-		Prompt:       buildUserPrompt(nlp.KindWord, e.termApplied, p.schemaJSON(nlp.KindWord)),
+		Prompt:       buildUserPrompt(nlp.KindWord, e.termApplied),
 		SchemaJSON:   p.schemaJSON(nlp.KindWord),
 	})
 	if err != nil {
@@ -381,16 +381,13 @@ func (p *Pipeline) translateText(ctx context.Context, e *runEnv) (any, error) {
 			return nil, p.providerFailed(ctx, err, e)
 		}
 		m := payload.(map[string]any)
-		mdParts = append(mdParts, m["translated_markdown"].(string))
-		if segs, ok := m["segments"].([]any); ok {
-			for _, seg := range segs {
-				sm := seg.(map[string]any)
-				segments = append(segments, dto.Segment{
-					Source:      sm["source"].(string),
-					Translation: sm["translation"].(string),
-				})
-			}
-		}
+		translated, _ := m["translated_markdown"].(string)
+		mdParts = append(mdParts, translated)
+		// The provider only returns the translation now (1.1.1): the parallel
+		// view is derived here by pairing the chunk's blank-line blocks with
+		// the translation's. A count mismatch simply yields no segments for
+		// that chunk — the translation itself is never affected.
+		segments = append(segments, pairSegments(chunk, translated)...)
 	}
 
 	// Assembled TextTranslation in its decoded-JSON shape (same convention as
@@ -411,6 +408,39 @@ func (p *Pipeline) translateText(ctx context.Context, e *runEnv) (any, error) {
 	}, nil
 }
 
+// pairSegments builds the 中英对照 view locally: the source and its translation
+// are split into blank-line blocks and paired by position (1.1.1 — the provider
+// used to emit both, which doubled the completion tokens for no extra
+// information). Blocks only pair when the counts match: a mismatch means the
+// model merged or split paragraphs, and guessing would mis-align the view, so
+// the translation is shown without per-segment pairs instead.
+func pairSegments(source, translation string) []dto.Segment {
+	src := splitParagraphs(source)
+	out := splitParagraphs(translation)
+	if len(src) == 0 || len(src) != len(out) {
+		return nil
+	}
+	segments := make([]dto.Segment, 0, len(src))
+	for i := range src {
+		segments = append(segments, dto.Segment{Source: src[i], Translation: out[i]})
+	}
+	return segments
+}
+
+// splitParagraphs splits markdown into its blank-line separated blocks, dropping
+// empty ones and normalising CRLF. (chunker.go's splitBlocks works on a
+// different block type for chunk budgeting — this one stays pure text.)
+func splitParagraphs(text string) []string {
+	parts := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n\n")
+	blocks := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			blocks = append(blocks, trimmed)
+		}
+	}
+	return blocks
+}
+
 // translateChunk translates one chunk: provider call, per-chunk schema
 // validation with one repair attempt, chunk-scoped protected-span restore
 // with one repair attempt and the terminology post-check with one repair
@@ -422,7 +452,7 @@ func (p *Pipeline) translateChunk(ctx context.Context, e *runEnv, systemPrompt, 
 		Kind:         nlp.KindText,
 		Input:        chunk,
 		SystemPrompt: systemPrompt,
-		Prompt:       buildUserPrompt(nlp.KindText, chunk, schemaJSON),
+		Prompt:       buildUserPrompt(nlp.KindText, chunk),
 		SchemaJSON:   schemaJSON,
 	})
 	if err != nil {

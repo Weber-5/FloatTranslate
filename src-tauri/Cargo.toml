@@ -1,6 +1,6 @@
 [package]
 name = "floattranslate"
-version = "1.1.0"
+version = "1.1.1"
 description = "FloatTranslate Windows host: frameless window, tray, single instance and Go sidecar supervision."
 license = "MIT"
 edition = "2021"

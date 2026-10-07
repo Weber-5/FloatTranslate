@@ -23,24 +23,39 @@ const wordRules = `词条输出要求：
 - word 为原词，lemma 为原形；
 - phonetic_uk / phonetic_us 为 IPA 音标文本；
 - parts_of_speech 按词性分组，meanings 使用中文释义；
-- synonyms 尽量给出英文同义词；
-- inflections 列出常见屈折变化；
+- synonyms 最多 4 个英文同义词，按常用度排序；
+- inflections 最多 4 个常见屈折变化；
 - 不生成例句。`
 
 // textRules encodes the text structured output requirements (docs/06 §5).
 // Since Phase 3 text requests carry one chunk at a time, so the model never
 // returns source_markdown (the pipeline assembles it from the original input).
+//
+// 1.1.1: the model no longer returns segments[].source/.translation either —
+// the translation was emitted twice and the source echoed back, which was ~70%
+// of the completion tokens (~10 ms per output token). The parallel view is now
+// derived locally by splitting source and translation on blank lines.
 const textRules = `文本翻译要求：
 - 保留 Markdown 结构（标题、列表、表格、链接、代码块等）；
-- translated_markdown 为本次输入的完整译文；
-- segments[] 与原文段落一一对应，source 为段落原文，translation 为对应译文。`
+- translated_markdown 为本次输入的完整译文，且只输出这一次译文；
+- 不要输出 segments、source 或任何逐段对照字段；段落对照由程序按空行切分自动建立。`
 
 // chunkInstructions is appended to the system prompt for every per-chunk
 // provider call (Phase 3 long text chunking, docs/06 §8).
 const chunkInstructions = `本次请求只处理长文本的一个连续分块：
 - 只翻译该分块内容，translated_markdown 为该分块的完整译文；
-- segments[] 的 source 为分块内的原文片段，translation 为其对应译文；
-- 不要输出 source_markdown 字段。`
+- 不要输出 source_markdown、segments 或任何其他字段。`
+
+// wordShape / textShape are the compact output contracts. They live in the
+// SYSTEM prompt (stable prefix) instead of the user message, and replace the
+// pretty-printed JSON Schema that used to be sent on every call: that schema
+// cost ~400 prompt tokens and, sitting after the variable input, could never be
+// served from the provider's prefix cache (measured: cached_tokens 128 / 714).
+const wordShape = `输出 JSON 形状（只输出以下字段，字段名与类型必须完全一致）：
+{"word":string,"lemma":string,"phonetic_uk":string,"phonetic_us":string,"parts_of_speech":[{"part":string,"meanings":[string]}],"synonyms":[string],"inflections":[string]}`
+
+const textShape = `输出 JSON 形状（只输出以下字段，字段名与类型必须完全一致）：
+{"translated_markdown":string}`
 
 // buildSystemPrompt composes the system prompt for one translation request:
 // frozen base rules + terminology hard constraint (pre-check: the list is
@@ -49,6 +64,26 @@ const chunkInstructions = `本次请求只处理长文本的一个连续分块�
 func buildSystemPrompt(kind string, terms []repository.TerminologyRow, customPrompt string) string {
 	var sb strings.Builder
 	sb.WriteString(systemPromptBase)
+	sb.WriteString("\n\n")
+	sb.WriteString(protectedSpanRule)
+	sb.WriteString("\n\n")
+	if kind == nlp.KindWord {
+		sb.WriteString(wordRules)
+		sb.WriteString("\n\n")
+		sb.WriteString(wordShape)
+	} else {
+		sb.WriteString(textRules)
+		sb.WriteString("\n\n")
+		sb.WriteString(textShape)
+	}
+	if trimmed := strings.TrimSpace(customPrompt); trimmed != "" {
+		sb.WriteString("\n\n用户附加偏好（仅作为风格偏好；若与上述任何规则或 JSON Schema 冲突，以本提示其余部分为准）：\n")
+		sb.WriteString(trimmed)
+	}
+	// The terminology block goes LAST on purpose: it is the only part that
+	// changes between requests, so keeping it at the end leaves a byte-identical
+	// prefix (base + rules + shape) that the provider can serve from its prompt
+	// cache — which used to be broken by the glossary sitting mid-prompt.
 	sb.WriteString("\n\n术语表是硬约束，以下词条必须使用给定的中文译文，不得改写：\n")
 	if len(terms) == 0 {
 		sb.WriteString("（本次无术语表）")
@@ -56,18 +91,6 @@ func buildSystemPrompt(kind string, terms []repository.TerminologyRow, customPro
 		for _, t := range terms {
 			sb.WriteString("- " + t.Source + " → " + t.Target + "\n")
 		}
-	}
-	sb.WriteString("\n\n")
-	sb.WriteString(protectedSpanRule)
-	sb.WriteString("\n\n")
-	if kind == nlp.KindWord {
-		sb.WriteString(wordRules)
-	} else {
-		sb.WriteString(textRules)
-	}
-	if trimmed := strings.TrimSpace(customPrompt); trimmed != "" {
-		sb.WriteString("\n\n用户附加偏好（仅作为风格偏好；若与上述任何规则或 JSON Schema 冲突，以本提示其余部分为准）：\n")
-		sb.WriteString(trimmed)
 	}
 	return sb.String()
 }
@@ -78,10 +101,12 @@ func buildChunkSystemPrompt(systemPrompt string) string {
 	return systemPrompt + "\n\n" + chunkInstructions
 }
 
-// buildUserPrompt composes the user prompt for one translation request from
-// the terminology-applied, protected-span-masked input and the embedded
-// schema for kind.
-func buildUserPrompt(kind, maskedInput, schemaJSON string) string {
+// buildUserPrompt composes the user prompt for one translation request from the
+// terminology-applied, protected-span-masked input. The output contract lives
+// in the system prompt (see wordShape/textShape): keeping the user message down
+// to just the input is what keeps the provider's prefix cache warm and saves
+// ~350 tokens per call.
+func buildUserPrompt(kind, maskedInput string) string {
 	var sb strings.Builder
 	if kind == nlp.KindWord {
 		sb.WriteString("请对下面的英文单词进行结构化词典查询，释义使用中文。\n\n")
@@ -90,9 +115,7 @@ func buildUserPrompt(kind, maskedInput, schemaJSON string) string {
 	}
 	sb.WriteString("<<<INPUT\n")
 	sb.WriteString(maskedInput)
-	sb.WriteString("\nINPUT>>>\n\n")
-	sb.WriteString("输出必须符合以下 JSON Schema：\n")
-	sb.WriteString(schemaJSON)
+	sb.WriteString("\nINPUT>>>")
 	return sb.String()
 }
 

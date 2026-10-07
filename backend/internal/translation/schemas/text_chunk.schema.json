@@ -5,31 +5,12 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "translated_markdown",
-    "segments"
+    "translated_markdown"
   ],
   "properties": {
     "translated_markdown": {
-      "type": "string"
-    },
-    "segments": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "source",
-          "translation"
-        ],
-        "properties": {
-          "source": {
-            "type": "string"
-          },
-          "translation": {
-            "type": "string"
-          }
-        }
-      }
+      "type": "string",
+      "minLength": 1
     }
   }
 }
