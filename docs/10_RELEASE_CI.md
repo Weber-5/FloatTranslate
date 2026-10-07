@@ -45,6 +45,28 @@ CI 必须预留条件式签名步骤：
 - 用户主动点击跳转下载。
 - 1.0 不静默下载、不静默安装。
 
+### 5.1 应用内自动更新（1.1.1）
+
+安装版在发现新版本时提供**「立即更新」**按钮，点击后：
+
+1. `tauri-plugin-updater` 读取
+   `https://github.com/Weber-5/FloatTranslate/releases/latest/download/latest.json`；
+2. 校验 minisign 签名（公钥在 `tauri.conf.json` 的 `plugins.updater.pubkey`）后下载更新包；
+3. 静默运行 NSIS 更新并调用 `process.relaunch()` 重启，用户看到的是「正在下载…%」与重启。
+
+仍然**不静默**：只有用户点击才会下载安装；失败/无签名包时给出明确提示并保留手动下载链接。
+
+发布侧要求（`.github/workflows/release.yml`）：
+
+- 构建时注入 `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`（仓库 secrets），
+  否则 bundler 不产出签名更新包；
+- 产物需带上 `FloatTranslate_<ver>_x64-setup.exe.sig`（新版 bundler 直接对安装 exe 签名；
+  旧版为 `*-setup.nsis.zip` + `.sig`），并上传 `latest.json`；
+- `createUpdaterArtifacts: true` 已在 `tauri.conf.json` 中开启。
+
+免安装版（portable）无法自更新：UI 显示手动替换提示，`get_backend_config` 额外返回
+`portable: true` 供前端判断。
+
 ## 6. Release Notes 模板
 
 - Highlights

@@ -18,6 +18,8 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2.5.0",
+    "@tauri-apps/plugin-process": "^2.4.0",
+    "@tauri-apps/plugin-updater": "^2.13.1",
     "dompurify": "^3.4.16",
     "marked": "^18.0.14",
     "pinia": "^3.0.2",

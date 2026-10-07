@@ -16,13 +16,17 @@ use crate::sidecar::BackendStatus;
 use crate::window_state;
 use crate::{log_line, AppState};
 
-/// Payload of `get_backend_config` (frozen contract):
-/// `{ "base_url": "http://127.0.0.1:<port>/api/v1", "token": ..., "data_root": ... }`
+/// Payload of `get_backend_config` (frozen contract + `portable` added in 1.1.1):
+/// `{ "base_url": "http://127.0.0.1:<port>/api/v1", "token": ..., "data_root": ...,
+///    "portable": false }`
 #[derive(Debug, Clone, Serialize)]
 pub struct BackendConfig {
     pub base_url: String,
     pub token: String,
     pub data_root: String,
+    /// True when this run uses the portable layout: the UI must not offer the
+    /// in-app installer there (it cannot replace itself).
+    pub portable: bool,
 }
 
 /// Serializable command error (Tauri requires `Serialize` on the `Err` type).
@@ -77,6 +81,7 @@ pub fn get_backend_config(state: State<'_, AppState>) -> Result<BackendConfig, C
         base_url: format!("http://127.0.0.1:{port}/api/v1"),
         token: state.token.clone(),
         data_root: state.data_root.to_string_lossy().into_owned(),
+        portable: state.portable,
     })
 }
 

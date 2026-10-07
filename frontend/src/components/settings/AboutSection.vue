@@ -20,6 +20,7 @@ import { useSettingsStore } from '@/stores/settings'
 import { getBackendConfig } from '@/api'
 import { APP_VERSION } from '@/constants'
 import { checkForUpdate, UpdateCheckError, type LatestRelease } from '@/services/update'
+import { installUpdateNow, isUpdaterAvailable, restartApp } from '@/services/updater'
 import { openLogsDir, openExternalUrl } from '@/services/native'
 import SettingRow from './SettingRow.vue'
 import IconExternal from '@/components/icons/IconExternal.vue'
@@ -58,6 +59,50 @@ const checking = ref(false)
 const updateError = ref<string | null>(null)
 /** The newer release when `update-available`; null otherwise. */
 const availableUpdate = ref<LatestRelease | null>(null)
+
+// ---- In-app update (1.1.1) --------------------------------------------------------
+
+const installing = ref(false)
+const installPercent = ref<number | null>(null)
+const installError = ref<string | null>(null)
+
+/**
+ * The installer can only be run by an installed copy inside the desktop host:
+ * a portable build has no installation to replace and a browser (mock mode) has
+ * no updater plugin, so both keep the manual download link.
+ */
+const canAutoUpdate = computed(() => isUpdaterAvailable() && getBackendConfig()?.portable !== true)
+
+const installLabel = computed(() => {
+  if (!installing.value) return t('settings.about.updateNow')
+  if (installPercent.value === null) return t('settings.about.updating')
+  return t('settings.about.updatingPercent', { percent: installPercent.value })
+})
+
+/** Downloads + installs the pending update, then relaunches into it. */
+async function onUpdateNow(): Promise<void> {
+  if (installing.value) return
+  installing.value = true
+  installError.value = null
+  installPercent.value = null
+
+  const result = await installUpdateNow((progress) => {
+    installPercent.value = progress.percent
+  })
+  if (result.status === 'installed') {
+    const restarted = await restartApp()
+    if (restarted.status !== 'installed') {
+      installing.value = false
+      installError.value = t('settings.about.updateRestartFailed')
+    }
+    return
+  }
+  installing.value = false
+  installError.value =
+    result.status === 'unavailable'
+      ? t('settings.about.updateUnavailable')
+      : t('settings.about.updateFailed', { reason: result.message })
+}
 
 async function runUpdateCheck(): Promise<void> {
   if (checking.value) return
@@ -160,6 +205,23 @@ async function onOpenExternal(url: string, event: MouseEvent): Promise<void> {
         <IconExternal :size="12" />
       </a>
       <span class="release-url">{{ availableUpdate.html_url ?? RELEASE_URL }}</span>
+      <button
+        v-if="canAutoUpdate"
+        type="button"
+        class="btn btn-primary btn-sm"
+        data-testid="update-now"
+        :disabled="installing"
+        @click="onUpdateNow"
+      >
+        {{ installLabel }}
+      </button>
+      <span v-else class="update-hint" data-testid="update-portable-hint">
+        {{ t('settings.about.portableUpdateHint') }}
+      </span>
+    </p>
+
+    <p v-if="installError" class="update-error" role="alert" data-testid="update-install-error">
+      <span>{{ installError }}</span>
     </p>
 
     <p v-if="updateError" class="update-error" role="alert" data-testid="update-error">

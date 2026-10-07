@@ -105,6 +105,41 @@ if (-not $ChecksumsOnly) {
         $installerName = "FloatTranslate_${Version}_x64-setup.exe"
         Copy-Item $installerSrc.FullName (Join-Path $DistDir $installerName) -Force
         Write-Host "  installer: $installerName"
+
+        # --- In-app updater artifacts (1.1.1) --------------------------------
+        # With bundle.createUpdaterArtifacts the bundler emits
+        # `*-setup.nsis.zip` (+ `.sig` when the signing key is present). The
+        # updater downloads exactly that zip and verifies the signature, so both
+        # files must ride along in dist and the release upload.
+        $updaterZip = Get-ChildItem $nsisDir -Filter '*-setup.nsis.zip' |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+        if ($updaterZip) {
+            $zipTarget = "FloatTranslate_${Version}_x64-setup.nsis.zip"
+            Copy-Item $updaterZip.FullName (Join-Path $DistDir $zipTarget) -Force
+            Write-Host "  updater    : $zipTarget"
+            $sig = Get-Item "$($updaterZip.FullName).sig" -ErrorAction SilentlyContinue
+            if ($sig) {
+                Copy-Item $sig.FullName (Join-Path $DistDir "$zipTarget.sig") -Force
+                Write-Host "  updater sig: $zipTarget.sig"
+            } else {
+                Write-Warning 'updater zip has no .sig (build without TAURI_SIGNING_PRIVATE_KEY); in-app updates will not verify'
+            }
+        } else {
+            Write-Warning 'no *.nsis.zip updater artifact found'
+        }
+        if (-not (Test-Path (Join-Path $DistDir "$installerName.sig"))) {
+            # Newer Tauri versions sign the installer exe itself rather than
+            # emitting a *.nsis.zip: the updater then downloads that exe. Ship
+            # the matching .sig so latest.json can carry its signature.
+            $exeSig = Get-Item "$($installerSrc.FullName).sig" -ErrorAction SilentlyContinue
+            if ($exeSig) {
+                Copy-Item $exeSig.FullName (Join-Path $DistDir "$installerName.sig") -Force
+                Write-Host "  updater sig: $installerName.sig (installer exe is the updater artifact)"
+            } else {
+                Write-Warning 'no signed updater artifact found; in-app updates will be unavailable for this release'
+            }
+        }
     } elseif ($AllowMissingInstaller) {
         Write-Warning 'no NSIS installer found; producing portable asset only (-AllowMissingInstaller)'
     } else {

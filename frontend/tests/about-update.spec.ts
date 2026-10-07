@@ -11,6 +11,8 @@ import {
   UpdateCheckError,
 } from '@/services/update'
 import { __setNativeInvokeForTests } from '@/services/native'
+import { __setUpdaterForTests, __setRelaunchForTests } from '@/services/updater'
+import { __setBackendConfigForTests } from '@/api'
 import AboutSection from '@/components/settings/AboutSection.vue'
 
 function releaseResponse(tag: string): Response {
@@ -47,6 +49,8 @@ const OLDER_TAG = 'v0.9.0'
 
 afterEach(() => {
   __setNativeInvokeForTests(null)
+  __setUpdaterForTests(null)
+  __setRelaunchForTests(null)
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
 })
@@ -273,6 +277,87 @@ describe('AboutSection update check UI', () => {
     await flushPromises()
     expect(wrapper.find('[data-testid="update-error"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="update-banner"]').text()).toContain(nextPatch(APP_VERSION))
+    wrapper.unmount()
+  })
+
+  // 1.1.1: the update banner offers an immediate install on installed builds.
+  it('立即更新 downloads, installs and relaunches', async () => {
+    let installs = 0
+    let relaunches = 0
+    const progress: Array<number | null> = []
+    __setUpdaterForTests({
+      check: async () => ({
+        version: '9.9.9',
+        downloadAndInstall: async (onEvent) => {
+          onEvent?.({ event: 'Started', data: { contentLength: 100 } })
+          onEvent?.({ event: 'Progress', data: { chunkLength: 40 } })
+          onEvent?.({ event: 'Finished' })
+          installs += 1
+        },
+      }),
+    })
+    __setRelaunchForTests(async () => {
+      relaunches += 1
+    })
+    vi.stubGlobal('fetch', vi.fn(async () => releaseResponse(nextPatch(APP_VERSION))))
+    const { wrapper } = await mountAbout()
+
+    await wrapper.find('[data-testid="check-update"]').trigger('click')
+    await flushPromises()
+    const button = wrapper.find('[data-testid="update-now"]')
+    expect(button.exists()).toBe(true)
+    expect(button.text()).toContain('立即更新')
+    // The button reports progress while it runs.
+    progress.push(null)
+
+    await button.trigger('click')
+    await flushPromises()
+
+    expect(installs).toBe(1)
+    expect(relaunches).toBe(1)
+    expect(wrapper.find('[data-testid="update-install-error"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  // The portable build has no installation to replace: it must keep the manual
+  // download link instead of pretending it can update itself.
+  it('portable build shows the manual hint instead of 立即更新', async () => {
+    const { i18n } = await setupFreshEnv()
+    __setBackendConfigForTests({
+      base_url: 'http://127.0.0.1:1/api/v1',
+      token: 'token',
+      data_root: 'C:\\Temp\\FloatTranslateData',
+      portable: true,
+    })
+    vi.stubGlobal('fetch', vi.fn(async () => releaseResponse(nextPatch(APP_VERSION))))
+    const wrapper = mount(AboutSection, { global: { plugins: [i18n] } })
+    await flushPromises()
+
+    await wrapper.find('[data-testid="check-update"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="update-banner"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="update-now"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="update-portable-hint"]').exists()).toBe(true)
+    wrapper.unmount()
+    __setBackendConfigForTests(null)
+  })
+
+  it('a release without an installable package reports it instead of failing silently', async () => {
+    __setUpdaterForTests({ check: async () => null })
+    const { i18n } = await setupFreshEnv()
+    vi.stubGlobal('fetch', vi.fn(async () => releaseResponse(nextPatch(APP_VERSION))))
+    const wrapper = mount(AboutSection, { global: { plugins: [i18n] } })
+    await flushPromises()
+
+    await wrapper.find('[data-testid="check-update"]').trigger('click')
+    await flushPromises()
+    await wrapper.find('[data-testid="update-now"]').trigger('click')
+    await flushPromises()
+
+    const error = wrapper.find('[data-testid="update-install-error"]')
+    expect(error.exists()).toBe(true)
+    expect(error.text()).toContain('手动下载')
     wrapper.unmount()
   })
 

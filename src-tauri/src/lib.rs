@@ -43,6 +43,10 @@ use crate::window_state::WindowState;
 pub struct AppState {
     /// Resolved data root (docs/07 §8).
     pub data_root: PathBuf,
+    /// True when this run uses the portable layout (`portable.flag` next to the
+    /// executable). The in-app updater is installed-mode only: a portable copy
+    /// cannot replace itself, so the UI offers the download link instead.
+    pub portable: bool,
     /// Per-run session token shared with the sidecar. Never log it.
     pub token: String,
     /// Sidecar supervisor.
@@ -87,6 +91,12 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
+        // In-app update (1.1.1): reads the signed `latest.json` manifest from
+        // the GitHub release, verifies the minisign signature and runs the NSIS
+        // updater. Installed mode only — see AppState::portable.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        // Restart after an update is installed.
+        .plugin(tauri_plugin_process::init())
         .setup(setup_app)
         .on_window_event(|window, event| {
             if window.label() != "main" {
@@ -199,6 +209,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     app.manage(AppState {
         data_root,
+        portable: portable_flag || dev_portable,
         token,
         backend: supervisor,
         always_on_top: AtomicBool::new(always_on_top),

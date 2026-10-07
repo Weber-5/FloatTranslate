@@ -37,6 +37,8 @@ export interface BackendConfig {
   base_url: string
   token: string
   data_root: string
+  /** True for the portable layout (1.1.1): the in-app updater is not offered. */
+  portable?: boolean
 }
 
 export class ApiError extends Error {

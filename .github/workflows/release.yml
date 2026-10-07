@@ -82,6 +82,13 @@ jobs:
         # staged sidecar exe lands in <install>/resources/; plain tauri.conf.json
         # stays without it because tauri-build validates resource globs on every
         # cargo invocation.
+        #
+        # The signing key makes the bundler emit the signed updater artifact
+        # (*-setup.nsis.zip + .sig) that the in-app updater downloads; without
+        # the secret the build still succeeds, just without in-app updates.
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npx @tauri-apps/cli@2 build --bundles nsis --config scripts/tauri-release.config.json
 
       - name: Package dist (rename portable + installer)
@@ -141,6 +148,40 @@ jobs:
           Set-Content -Path dist/release-notes.md -Value $notes -Encoding utf8
           Write-Host "release notes written for $env:GITHUB_REF_NAME"
 
+      - name: Generate updater manifest (latest.json)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $tag = $env:GITHUB_REF_NAME
+          $asset = Get-ChildItem dist -Filter '*setup.nsis.zip' | Select-Object -First 1
+          if (-not $asset) {
+            # Newer Tauri signs the installer exe itself instead of zipping it.
+            $asset = Get-ChildItem dist -Filter '*setup.exe' | Select-Object -First 1
+          }
+          if (-not $asset) {
+            Write-Warning 'no updater artifact in dist: writing no latest.json (in-app updates stay unavailable)'
+            exit 0
+          }
+          $sigPath = "$($asset.FullName).sig"
+          if (-not (Test-Path $sigPath)) {
+            Write-Warning "missing $sigPath: writing no latest.json (unsigned updates must never be advertised)"
+            exit 0
+          }
+          $manifest = [ordered]@{
+            version   = $version
+            notes     = "FloatTranslate $version"
+            pub_date  = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+            platforms = [ordered]@{
+              'windows-x86_64' = [ordered]@{
+                signature = (Get-Content $sigPath -Raw).Trim()
+                url       = "https://github.com/$($env:GITHUB_REPOSITORY)/releases/download/$tag/$($asset.Name)"
+              }
+            }
+          }
+          $manifest | ConvertTo-Json -Depth 6 | Set-Content -Path dist/latest.json -Encoding utf8
+          Write-Host "latest.json written for $version -> $($asset.Name)"
+
       - name: Create draft GitHub release
         uses: softprops/action-gh-release@v2
         with:
@@ -155,6 +196,9 @@ jobs:
             dist/FloatTranslate_*_x64-setup.exe
             dist/FloatTranslate_*_x64-portable.exe
             dist/FloatTranslate_*_x64-portable.zip
+            dist/FloatTranslate_*_x64-setup.nsis.zip
+            dist/FloatTranslate_*_x64-setup.nsis.zip.sig
+            dist/latest.json
             dist/floattranslate-backend.exe
             dist/checksums.txt
             dist/release-notes.md
