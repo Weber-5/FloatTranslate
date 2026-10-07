@@ -165,7 +165,7 @@ jobs:
           }
           $sigPath = "$($asset.FullName).sig"
           if (-not (Test-Path $sigPath)) {
-            Write-Warning "missing $sigPath: writing no latest.json (unsigned updates must never be advertised)"
+            Write-Warning "missing ${sigPath}: writing no latest.json (unsigned updates must never be advertised)"
             exit 0
           }
           $manifest = [ordered]@{
